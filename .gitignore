@@ -1,1 +1,5 @@
 imagenet100_128x128/*
+output/
+wandb/
+__pycache__/
+*.pyc

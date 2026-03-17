@@ -1,6 +1,7 @@
 import os 
 import sys 
 import argparse
+import math
 import numpy as np
 import ruamel.yaml as yaml
 import torch
@@ -23,6 +24,19 @@ from utils import seed_everything, init_distributed_device, is_primary, AverageM
 logger = get_logger(__name__)
 
 
+def resolve_training_schedule(num_epochs, num_update_steps_per_epoch, max_train_steps=None):
+    if num_update_steps_per_epoch <= 0:
+        raise ValueError("`num_update_steps_per_epoch` must be positive.")
+
+    if max_train_steps is None:
+        return num_epochs, num_epochs * num_update_steps_per_epoch
+    if max_train_steps <= 0:
+        raise ValueError("`max_train_steps` must be positive when provided.")
+
+    resolved_num_epochs = max(num_epochs, math.ceil(max_train_steps / num_update_steps_per_epoch))
+    return resolved_num_epochs, max_train_steps
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a model.")
     
@@ -40,6 +54,7 @@ def parse_args():
     parser.add_argument("--run_name", type=str, default=None, help="run_name")
     parser.add_argument("--output_dir", type=str, default="experiments", help="output folder")
     parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--max_train_steps", type=int, default=None, help="optional override for total training steps")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="weight decay")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="gradient clip")
@@ -234,7 +249,11 @@ def main():
     num_update_steps_per_epoch = len(train_loader)
     if num_update_steps_per_epoch == 0:
         raise ValueError("Training dataloader is empty. Check `data_dir`, `batch_size`, and dataset structure.")
-    args.max_train_steps = args.num_epochs * num_update_steps_per_epoch
+    args.num_epochs, args.max_train_steps = resolve_training_schedule(
+        args.num_epochs,
+        num_update_steps_per_epoch,
+        args.max_train_steps,
+    )
     
     #  setup distributed training
     class_embedder_wo_ddp = class_embedder
@@ -256,12 +275,25 @@ def main():
     else:
         unet_wo_ddp = unet
     vae_wo_ddp = vae
-    # TODO: setup ddim
     scheduler_wo_ddp = diffusion_scheduler
+    if args.use_ddim:
+        eval_scheduler = DDIMScheduler(
+            num_train_timesteps=args.num_train_timesteps,
+            num_inference_steps=args.num_inference_steps,
+            beta_start=args.beta_start,
+            beta_end=args.beta_end,
+            beta_schedule=args.beta_schedule,
+            variance_type=args.variance_type,
+            prediction_type=args.prediction_type,
+            clip_sample=args.clip_sample,
+            clip_sample_range=args.clip_sample_range,
+        ).to(device)
+    else:
+        eval_scheduler = diffusion_scheduler
     
     # TODO: setup evaluation pipeline
     # NOTE: this pipeline is not differentiable and only for evaluatin
-    pipeline = None
+    pipeline = DDPMPipeline(unet_wo_ddp, eval_scheduler, vae=vae_wo_ddp, class_embedder=class_embedder_wo_ddp)
     
     
     # dump config file
@@ -292,6 +324,8 @@ def main():
         logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not is_primary(args))
+    completed_steps = 0
+    stop_training = False
 
     # training
     for epoch in range(args.num_epochs):
@@ -386,46 +420,49 @@ def main():
                 lr_scheduler.step()
             
             progress_bar.update(1)
+            completed_steps += 1
             
             # logger
             if step % 100 == 0 and is_primary(args):
                 logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Step {step}/{num_update_steps_per_epoch}, Loss {loss.item()} ({loss_m.avg})")
                 wandb_logger.log({'loss': loss_m.avg})
 
+            if completed_steps >= args.max_train_steps:
+                stop_training = True
+                break
+
         # validation
         # send unet to evaluation mode
         unet.eval()
-        if pipeline is not None:
-            generator = torch.Generator(device=device)
-            generator.manual_seed(epoch + args.seed)
-            
-            # NOTE: this is for CFG
-            if args.use_cfg:
-                # random sample 4 classes
-                classes = torch.randint(0, args.num_classes, (4,), device=device)
-                # TODO: fill pipeline
-                gen_images = pipeline(None) 
-            else:
-                # TODO: fill pipeline
-                gen_images = pipeline(None) 
-                
-            # create a blank canvas for the grid
-            grid_image = Image.new('RGB', (4 * args.image_size, 1 * args.image_size))
-            # paste images into the grid
-            for i, image in enumerate(gen_images):
-                x = (i % 4) * args.image_size
-                y = 0
-                grid_image.paste(image, (x, y))
-            
-            # Send to wandb
-            if is_primary(args):
-                wandb_logger.log({'gen_images': wandb.Image(grid_image)})
-        elif is_primary(args):
-            logger.info("Skipping validation sampling until DDPMPipeline is implemented.")
+        generator = torch.Generator(device=device)
+        generator.manual_seed(epoch + args.seed)
+        gen_images = pipeline(
+            batch_size=4,
+            num_inference_steps=args.num_inference_steps,
+            generator=generator,
+            device=device,
+        )
+        
+        # create a blank canvas for the grid
+        grid_image = Image.new('RGB', (4 * args.image_size, 1 * args.image_size))
+        # paste images into the grid
+        for i, image in enumerate(gen_images):
+            x = (i % 4) * args.image_size
+            y = 0
+            grid_image.paste(image, (x, y))
+        
+        # Send to wandb
+        if is_primary(args):
+            wandb_logger.log({'gen_images': wandb.Image(grid_image)})
             
         # save checkpoint
         if is_primary(args):
             save_checkpoint(unet_wo_ddp, scheduler_wo_ddp, vae_wo_ddp, class_embedder_wo_ddp, optimizer, epoch, save_dir=save_dir)
+
+        if stop_training:
+            if is_primary(args):
+                logger.info(f"Reached max_train_steps={args.max_train_steps}. Stopping training early.")
+            break
 
 
 if __name__ == '__main__':
