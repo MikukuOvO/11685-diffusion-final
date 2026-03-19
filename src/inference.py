@@ -139,7 +139,7 @@ def main():
     pipeline = DDPMPipeline(unet, scheduler, vae=vae, class_embedder=class_embedder)
 
     logger.info("***** Running Inference *****")
-    total_images = 5000
+    total_images = 1000
     save_dir = os.path.join(os.path.dirname(args.ckpt), "generated_images")
     all_images = generate_unconditional_batches(
         pipeline=pipeline,
