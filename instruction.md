@@ -1,307 +1,643 @@
-可以。按你们现在的代码状态，midterm 最合理的实验流程应该是围绕这两个核心问题展开：
+# Diffusion Final Project Quick Pickup
 
-DDPM 有没有正常学会生成图像
-DDIM 能不能在不重新训练的前提下加快采样，并尽量保持质量
-你们现在最适合做的是一套“1 个训练主实验 + 1 组推理对比实验 + 1 个小规模 FID 验证”的流程。下面我按实际执行顺序给你完整展开。
+This document is for quickly taking over the current codebase and running the final-project experiments. The repo currently supports:
 
-一、先明确 midterm 的实验目标
-midterm 不要铺太大。你们当前代码最稳的目标是：
+- Pixel-space DDPM training.
+- DDIM sampling from a DDPM checkpoint.
+- VAE training and VAE image generation.
+- Latent DDPM training with a frozen VAE.
+- Classifier-free guidance (CFG) through class conditioning and class dropout.
+- Kaggle submission CSV generation from generated images.
+- W&B logging plus local JSONL metrics.
 
-训练一个 pixel-space unconditional DDPM
-用训练好的同一个 checkpoint 分别用 DDPM sampler 和 DDIM sampler 采样
-比较它们的生成质量和采样速度
-用小规模 FID 和可视化样本支撑结论
-所以 midterm 的实验对象建议就这两个：
+Current repo:
 
-Model A: DDPM training + DDPM sampling
-Model B: DDPM training + DDIM sampling
-注意第二个不是新训练模型，只是换采样器。
+```bash
+/media/volume/mmci/bozhu/11685/Project
+branch: main
+remote: git@github.com:MikukuOvO/11685-diffusion-final.git
+```
 
-二、实验总流程
-完整流程建议分成 6 步。
+## Code Structure
 
-准备数据和环境
-训练 baseline DDPM
-从多个 checkpoint 做定性检查
-对 selected checkpoint 做小规模 FID
-用同一个 checkpoint 做 DDPM vs DDIM 推理对比
-选出 best setting，再决定要不要补 full 5000-image evaluation
-三、Step 1：准备数据和环境
-你们先确保这几件事没问题：
+```text
+Project/
+├── instruction.md                 # this quick pickup guide
+├── Diffusion_writeup_final.pdf     # final report / assignment handout
+├── output/                         # training logs, checkpoints, generated samples, eval outputs
+└── src/
+    ├── train.py                    # DDPM / latent DDPM / CFG training entrypoint
+    ├── inference.py                # image generation from DDPM or latent CFG checkpoints
+    ├── train_vae.py                # VAE baseline training
+    ├── inference_vae.py            # VAE sampling from a trained VAE checkpoint
+    ├── generate_submission.py      # Inception features, local FID, Kaggle CSV
+    ├── fid_utils.py                # shared FID/Inception utilities
+    ├── configs/
+    │   ├── ddpm.yaml               # starter/default DDPM config
+    │   ├── ddpm_a100_40gb.yaml     # current pixel DDPM long-run config
+    │   ├── latent_cfg_a100_40gb.yaml # current latent DDPM + CFG long-run config
+    │   └── vae.yaml                # VAE baseline config
+    ├── models/
+    │   ├── unet.py                 # U-Net denoiser
+    │   ├── unet_modules.py         # U-Net blocks and attention
+    │   ├── class_embedder.py       # class embedding + unconditional token for CFG
+    │   ├── vae.py                  # VAE wrapper: encode/decode/reconstruct/sample
+    │   ├── vae_modules.py          # VAE encoder/decoder modules
+    │   └── vae_distributions.py    # diagonal Gaussian posterior
+    ├── schedulers/
+    │   ├── scheduling_ddpm.py      # DDPM forward/reverse scheduler
+    │   └── scheduling_ddim.py      # DDIM scheduler
+    ├── pipelines/
+    │   └── ddpm.py                 # sampling pipeline; supports VAE decode and CFG
+    ├── utils/
+    │   ├── checkpoint.py           # save/load UNet, scheduler, VAE, class embedder
+    │   ├── dist.py                 # distributed-device helpers
+    │   ├── metric.py               # AverageMeter
+    │   └── misc.py                 # seeds, bool parsing, randn helper
+    └── tests/
+        ├── test_inference.py
+        ├── test_pipeline.py
+        ├── test_schedulers.py
+        ├── test_train_utils.py
+        └── test_vae.py
+```
 
-数据目录是 data/imagenet100_128x128/train
-能运行 python train.py --config configs/ddpm.yaml
-能运行 python inference.py --config configs/ddpm.yaml --ckpt <checkpoint>
-如果你们后面要算本地 FID，还需要一个 reference stats 文件，比如：
+Generated outputs are not source code. The important generated locations are:
 
-val_stats.npz
-如果老师或 starter code 没直接给，你们就需要先用 validation images 生成一次 reference statistics。这个在报告里可以写成“FID is computed against validation feature statistics provided by the course pipeline”或者“computed against validation-set reference statistics”。
+```text
+output/train_runs/<run_name>/checkpoints/       # training checkpoints
+output/train_runs/<run_name>/metrics.jsonl      # structured training metrics
+output/train_runs/<run_name>/samples/           # sample grids saved at epoch end
+output/logs/                                    # tmux shell logs
+output/report_eval/                             # FID summaries, grids, CSV/NPZ eval artifacts
+```
 
-四、Step 2：训练 baseline DDPM
-先只训练一个最标准的 baseline，不要一上来做太多改动。
+## Environment Setup
 
-你们当前默认配置是：
+Miniconda has already been installed locally:
 
-image size: 128
-batch size: 4
-epochs: 10
-optimizer: AdamW
-learning rate: 1e-4
-weight decay: 1e-4
-train timesteps: 1000
-inference steps: 200
-beta schedule: linear
-prediction type: epsilon
-gradient clipping: 1.0
-训练命令就是：
+```bash
+/media/volume/mmci/bozhu/11685/tools/miniconda3
+```
 
-cd /home/exouser/bozhu/11685/Project/src
-python train.py --config configs/ddpm.yaml
-训练期间你们要保存三类东西：
+The project environment is:
 
-每个 epoch 的 training loss
-每个 epoch 自动生成的 sample grid
-每个 epoch 的 checkpoint
-你们当前代码已经会：
+```bash
+intro2dl
+```
 
-log loss 到 wandb
-每个 epoch 生成 4 张图
-保存 checkpoint
-所以这一步你们不用额外改太多。
+Activate it:
 
-这一阶段你们真正要观察的指标：
+```bash
+source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl
+```
 
-loss 是否稳定下降
-生成图像是否从纯噪声逐渐变成有结构的自然图像
-是否出现 mode collapse、颜色塌陷、全灰图、重复纹理等问题
-五、Step 3：从训练过程中挑 checkpoint
-midterm 不建议只看最后一个 checkpoint。建议从训练中选 3 个点做比较，比如：
+If the environment needs to be recreated from scratch:
 
-early checkpoint: epoch 2
-middle checkpoint: epoch 5
-late checkpoint: epoch 9 或 epoch 10
-为什么这么做：
+```bash
+cd /media/volume/mmci/bozhu/11685/Project
 
-可以展示模型是逐步学到东西的
-如果最后一个 checkpoint 过拟合或不稳定，也有中间结果可以比较
-写报告时更容易做“progress so far”与“analysis”
-你们要做的是对这几个 checkpoint 各生成一组固定 seed 的样本，然后人工看：
+# Install Miniconda first if missing, then:
+/media/volume/mmci/bozhu/11685/tools/miniconda3/bin/conda create -y -n intro2dl python=3.10
+source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl
 
-结构是否更清晰
-多样性是否更高
-背景和主体是否更自然
-有没有明显 artifacts
-这一步得到一个结论：
+conda install -y -c pytorch -c nvidia \
+  pytorch=2.5.1 torchvision=0.20.1 torchaudio pytorch-cuda=12.1
 
-best checkpoint for midterm evaluation
-通常可以选：
+# Avoid MKL 2025 iJIT symbol issues seen on this machine.
+conda install -y 'mkl<2025' 'intel-openmp<2025'
 
-qualitative 最好的一轮
-或 loss 较低且图像最自然的一轮
-六、Step 4：做 midterm 小规模 FID
-这里不要直接上 5000。midterm 推荐：
+pip install -r src/requirements.txt pytest
+```
 
-1000 张图
-这是比较平衡的选择。足够做相对比较，也不会太慢。
+Verify the environment:
 
-但你们现有 inference.py 默认写死了生成 5000 张，所以 midterm 有两个做法。
+```bash
+cd /media/volume/mmci/bozhu/11685/Project
+PYTHONPATH=src python -m pytest -q src/tests
+```
 
-做法 A：最推荐
-临时把 inference.py 里的
+Expected result at the time of writing:
 
-total_images = 5000
-改成
+```text
+17 passed
+```
 
-total_images = 1000
-然后对 selected checkpoint 生成 1000 张图。
+Check CUDA:
 
-命令：
+```bash
+python - <<'PY'
+import torch
+print(torch.__version__)
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no cuda")
+PY
+```
 
-python inference.py --config configs/ddpm.yaml --ckpt /path/to/checkpoint_epoch_X.pth
-生成完以后，如果你们有 validation reference stats：
+Expected GPU on the current machine:
 
-python generate_submission.py \
-  --image_dir /path/to/generated_images \
-  --output midterm_eval.csv \
-  --reference /path/to/val_stats.npz
-虽然这个脚本叫 submission，但其实它也会顺便算本地 FID。
+```text
+NVIDIA A100-SXM4-40GB
+```
 
-做法 B：如果你们不想改主脚本
-单独写一个小脚本，调用 generate_unconditional_batches(..., total_images=1000)。
-这个也行，但对 midterm 来说没必要绕那么多，直接临时改成 1000 最简单。
+## Data Layout
 
-midterm 阶段 FID 怎么用
-这时候 FID 的作用不是拿绝对数值做最终 benchmark，而是：
+The training configs expect ImageFolder-style data:
 
-比较不同 checkpoint
-比较 DDPM sampler 和 DDIM sampler
-支撑“模型确实在进步”这个结论
-所以报告里最好写：
+```text
+imagenet100_128x128/train/<class_name>/*.png
+```
 
-reduced-sample FID on 1000 generated images
-used for relative comparison during development
-final evaluation will use 5000 generated images
-七、Step 5：做 DDPM vs DDIM 推理对比
-这个是 midterm 非常重要的一组实验，因为 writeup 明确要求实现 DDIM。
+Current long-run configs use:
 
-关键点是：
+```bash
+../imagenet100_128x128/train
+```
 
-训练只做一次
-用同一个 best checkpoint
-分别换不同 sampler 和不同 inference steps
-我建议你们至少做下面这组：
+relative to `src/`, so from repo root this is:
 
-DDPM, 200 steps
-DDIM, 200 steps
-DDIM, 100 steps
-DDIM, 50 steps
-你们要比较三个东西：
+```bash
+/media/volume/mmci/bozhu/11685/imagenet100_128x128/train
+```
 
-生成速度
-FID
-视觉质量
-这里最重要的是“trade-off”：
+## Experiment Design
 
-DDIM 是否在更少步数下还能保持接近的质量
-降到 100 或 50 步时，速度提升多少
-质量下降是否可以接受
-怎么跑
-你们现有配置里有：
+The final report should cover both pixel-space and latent-space diffusion:
 
-use_ddim: false
-num_inference_steps: 200
-所以你们可以用命令行覆盖。
+1. **Pixel DDPM baseline**
+   - Train U-Net directly on normalized 128x128 RGB images.
+   - This is the safest Kaggle backup because it does not depend on VAE quality.
 
-例如 DDPM 200 steps：
+2. **DDIM sampling**
+   - Use the same pixel DDPM checkpoint.
+   - Compare DDPM/DDIM at different sampling steps, e.g. DDPM 200, DDIM 100, DDIM 50.
+   - Report the quality/speed trade-off.
+
+3. **VAE baseline**
+   - Train/evaluate the VAE separately.
+   - The current VAE is functional but previous visual/FID quality was weak, so do not assume it is the best submission model.
+
+4. **Latent DDPM**
+   - Freeze the VAE encoder/decoder.
+   - Encode images to latents, scale by `vae_scale_factor=0.1845`, and train diffusion in latent space.
+   - Decode generated latents back to image space during sampling.
+
+5. **Latent DDPM + CFG**
+   - Add class conditioning with `ClassEmbedder`.
+   - During training, class labels are randomly replaced with an unconditional token with `cond_drop_rate=0.1`.
+   - During sampling, CFG uses:
+
+```text
+eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+```
+
+6. **Evaluation**
+   - Use generated grids for qualitative progress.
+   - Use denoising MSE for quick training sanity checks.
+   - Use local FID against validation statistics for checkpoint/model selection.
+   - Generate exactly 5000 images for Kaggle final submission, 50 per class for CFG runs.
+
+Recommended run order:
+
+```text
+1. Pixel DDPM long run
+2. Evaluate first/medium/late pixel checkpoints with 1000-image local FID
+3. Use best pixel checkpoint for DDPM vs DDIM comparison
+4. Run latent DDPM + CFG after confirming VAE quality is acceptable
+5. Compare best pixel and best latent/CFG checkpoints
+6. Generate final 5000-image Kaggle CSV from the best model
+```
+
+## Current Long Training Run
+
+At the time this guide was updated, the active training run was:
+
+```text
+tmux session: pixel_ddpm_online
+W&B: https://wandb.ai/fenglin02/ddpm/runs/cnqmsiyp
+run dir: output/train_runs/exp-9-ddpm_a100_40gb_online_20260418_165147
+shell log: output/logs/pixel_ddpm_online_20260418_165147.log
+```
+
+Check whether it is still running:
+
+```bash
+tmux has-session -t pixel_ddpm_online && echo running
+```
+
+Follow the shell log without attaching to tmux:
+
+```bash
+tail -f /media/volume/mmci/bozhu/11685/Project/output/logs/pixel_ddpm_online_20260418_165147.log
+```
+
+Follow structured metrics:
+
+```bash
+tail -f /media/volume/mmci/bozhu/11685/Project/output/train_runs/exp-9-ddpm_a100_40gb_online_20260418_165147/metrics.jsonl
+```
+
+Monitor GPU:
+
+```bash
+watch -n 5 nvidia-smi
+```
+
+The A100 run was around:
+
+```text
+batch size: 16
+speed: about 0.22 sec/step
+steps per epoch: 8125
+one epoch: about 30 minutes
+150000 steps: about 9.3-9.7 hours including checkpoint/sample overhead
+```
+
+## W&B
+
+W&B is installed in the conda env. A wrapper also exists at:
+
+```bash
+/home/exouser/.local/bin/wandb
+```
+
+Verify login:
+
+```bash
+wandb login --verify
+```
+
+For live online logging, use:
+
+```bash
+WANDB_MODE=online python train.py --config configs/ddpm_a100_40gb.yaml
+```
+
+For offline logging:
+
+```bash
+WANDB_MODE=offline python train.py --config configs/ddpm_a100_40gb.yaml
+```
+
+Sync an offline run later:
+
+```bash
+wandb sync /media/volume/mmci/bozhu/11685/Project/src/wandb/offline-run-YYYYMMDD_HHMMSS-RUNID
+```
+
+## Run Pixel DDPM Training
+
+Use this as the main long-run baseline:
+
+```bash
+cd /media/volume/mmci/bozhu/11685/Project/src
+source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl
+WANDB_MODE=online python train.py --config configs/ddpm_a100_40gb.yaml
+```
+
+Detached tmux version:
+
+```bash
+tmux new-session -d -s pixel_ddpm_online \
+  "cd /media/volume/mmci/bozhu/11685/Project/src && \
+   source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl && \
+   mkdir -p ../output/logs && \
+   export WANDB_MODE=online && \
+   export PYTHONUNBUFFERED=1 && \
+   python train.py --config configs/ddpm_a100_40gb.yaml --run_name ddpm_a100_40gb_online_$(date -u +%Y%m%d_%H%M%S) \
+     2>&1 | tee ../output/logs/pixel_ddpm_online_$(date -u +%Y%m%d_%H%M%S).log"
+```
+
+Important config values:
+
+```text
+config: src/configs/ddpm_a100_40gb.yaml
+batch_size: 16
+max_train_steps: 150000
+learning_rate: 2e-4
+num_train_timesteps: 1000
+num_inference_steps: 100
+use_ddim: true for validation sampling
+```
+
+Training writes:
+
+```text
+output/train_runs/<run>/config.yaml
+output/train_runs/<run>/metrics.jsonl
+output/train_runs/<run>/samples/epoch_XXXX.png
+output/train_runs/<run>/checkpoints/checkpoint_epoch_X.pth
+```
+
+## Run VAE Training
+
+Use only if improving latent DDPM quality:
+
+```bash
+cd /media/volume/mmci/bozhu/11685/Project/src
+source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl
+python train_vae.py --config configs/vae.yaml --output_dir ../output/vae_runs --run_name vae_baseline
+```
+
+Generate images from a VAE checkpoint:
+
+```bash
+python inference_vae.py \
+  --config configs/vae.yaml \
+  --ckpt ../output/vae_runs/vae_baseline/checkpoints/checkpoint_epoch_0.pth \
+  --total_images 1000 \
+  --output_dir ../output/report_eval/vae_1000
+```
+
+Known caveat: earlier VAE results looked weak and had poor local FID. Treat VAE quality as a risk for latent DDPM.
+
+## Run Latent DDPM + CFG Training
+
+This trains diffusion in VAE latent space with class conditioning:
+
+```bash
+cd /media/volume/mmci/bozhu/11685/Project/src
+source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl
+WANDB_MODE=online python train.py --config configs/latent_cfg_a100_40gb.yaml
+```
+
+Detached tmux version:
+
+```bash
+tmux new-session -d -s latent_cfg_train \
+  "cd /media/volume/mmci/bozhu/11685/Project/src && \
+   source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl && \
+   mkdir -p ../output/logs && \
+   export WANDB_MODE=online && \
+   export PYTHONUNBUFFERED=1 && \
+   python train.py --config configs/latent_cfg_a100_40gb.yaml --run_name latent_cfg_a100_40gb_online \
+     2>&1 | tee ../output/logs/latent_cfg_train.log"
+```
+
+Important config values:
+
+```text
+config: src/configs/latent_cfg_a100_40gb.yaml
+batch_size: 64
+max_train_steps: 150000
+vae_ckpt: ../output/vae_runs/vae_baseline_10k_bs16/checkpoints/checkpoint_epoch_1.pth
+latent_ddpm: true
+use_cfg: true
+cond_drop_rate: 0.1
+cfg_guidance_scale: 2.0
+```
+
+Do not run pixel DDPM and latent CFG long runs on the same A100 unless you intentionally monitor memory and throughput.
+
+## Inference From a Checkpoint
+
+Pixel DDPM / DDIM generation:
+
+```bash
+cd /media/volume/mmci/bozhu/11685/Project/src
+source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl
 
 python inference.py \
-  --config configs/ddpm.yaml \
-  --ckpt /path/to/checkpoint_epoch_X.pth \
-  --use_ddim false \
-  --num_inference_steps 200
-DDIM 200 steps：
-
-python inference.py \
-  --config configs/ddpm.yaml \
-  --ckpt /path/to/checkpoint_epoch_X.pth \
-  --use_ddim true \
-  --num_inference_steps 200
-DDIM 100 steps：
-
-python inference.py \
-  --config configs/ddpm.yaml \
-  --ckpt /path/to/checkpoint_epoch_X.pth \
+  --config configs/ddpm_a100_40gb.yaml \
+  --ckpt ../output/train_runs/<run>/checkpoints/checkpoint_epoch_0.pth \
+  --total_images 1000 \
+  --batch_size 16 \
   --use_ddim true \
   --num_inference_steps 100
-DDIM 50 steps：
+```
 
+Generated images are saved under:
+
+```text
+output/train_runs/<run>/checkpoints/generated_images/
+```
+
+Latent CFG generation:
+
+```bash
 python inference.py \
-  --config configs/ddpm.yaml \
-  --ckpt /path/to/checkpoint_epoch_X.pth \
+  --config configs/latent_cfg_a100_40gb.yaml \
+  --ckpt ../output/train_runs/<latent_run>/checkpoints/checkpoint_epoch_0.pth \
+  --total_images 1000 \
+  --batch_size 64 \
+  --use_ddim true \
+  --num_inference_steps 100 \
+  --cfg_guidance_scale 2.0
+```
+
+For CFG, `inference.py` assigns classes in Kaggle order:
+
+```text
+5000 images total = 100 classes * 50 images per class
+class = image_index // 50
+```
+
+## Local FID and Kaggle CSV
+
+Reference validation stats are currently stored at:
+
+```bash
+output/report_eval/val_stats.npz
+```
+
+After generating images, compute local FID and a CSV:
+
+```bash
+cd /media/volume/mmci/bozhu/11685/Project/src
+source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl
+
+python generate_submission.py \
+  --image_dir ../output/train_runs/<run>/checkpoints/generated_images \
+  --output ../output/report_eval/<run>_1000.csv \
+  --reference ../output/report_eval/val_stats.npz \
+  --save_npz ../output/report_eval/<run>_1000.npz \
+  --batch_size 64
+```
+
+For Kaggle final submission, generate exactly 5000 images:
+
+```bash
+python inference.py \
+  --config configs/ddpm_a100_40gb.yaml \
+  --ckpt ../output/train_runs/<best_run>/checkpoints/<best_checkpoint>.pth \
+  --total_images 5000 \
+  --batch_size 16 \
+  --use_ddim true \
+  --num_inference_steps 100
+
+python generate_submission.py \
+  --image_dir ../output/train_runs/<best_run>/checkpoints/generated_images \
+  --output ../output/report_eval/kaggle_submission.csv \
+  --batch_size 64
+```
+
+Upload `kaggle_submission.csv` to the Kaggle/InClass competition.
+
+## DDPM vs DDIM Comparison
+
+Use the same checkpoint and vary only sampler/steps.
+
+DDPM baseline:
+
+```bash
+python inference.py \
+  --config configs/ddpm_a100_40gb.yaml \
+  --ckpt ../output/train_runs/<run>/checkpoints/<ckpt>.pth \
+  --total_images 1000 \
+  --use_ddim false \
+  --num_inference_steps 200
+```
+
+DDIM 100:
+
+```bash
+python inference.py \
+  --config configs/ddpm_a100_40gb.yaml \
+  --ckpt ../output/train_runs/<run>/checkpoints/<ckpt>.pth \
+  --total_images 1000 \
+  --use_ddim true \
+  --num_inference_steps 100
+```
+
+DDIM 50:
+
+```bash
+python inference.py \
+  --config configs/ddpm_a100_40gb.yaml \
+  --ckpt ../output/train_runs/<run>/checkpoints/<ckpt>.pth \
+  --total_images 1000 \
   --use_ddim true \
   --num_inference_steps 50
-每次建议都生成同样数量的图，比如：
+```
 
-midterm 小规模评估统一生成 1000 张
-然后记录：
+Record for the report:
 
-wall-clock inference time
-FID
+```text
+sampler
+inference steps
+wall-clock generation time
+local FID@1000
 representative image grid
-你们最终最想写出的结论通常是：
+notes on visual quality/artifacts
+```
 
-DDIM 在更少采样步数下显著加快生成
-在 100 步甚至 50 步时，视觉质量仍保持可接受
-但过少步数可能会带来更多 artifacts 或更高 FID
-八、Step 6：结果整理成 report 里的表和图
-你们至少需要准备三类结果。
+## Metrics and Logs
 
-1. Training progress figure
-一张图就够：
+`train.py` writes W&B metrics and local JSONL. The JSONL records include:
 
-x-axis: epoch
-y-axis: training loss
-如果能再配一排 sample grids 更好：
+```text
+loss_step
+loss_avg
+lr
+grad_norm
+batch_mean
+batch_std
+timestep_mean
+timestep_min
+timestep_max
+seconds_per_step
+global_step
+epoch
+```
 
-epoch 1
-epoch 5
-epoch 10
-这能很好说明“模型确实在学”。
+Inspect latest metrics:
 
-2. Checkpoint comparison table
-比如：
+```bash
+tail -n 20 output/train_runs/<run>/metrics.jsonl
+```
 
-Checkpoint	Train Loss	FID@1000	Visual Quality
-Epoch 2	...	...	blurry
-Epoch 5	...	...	recognizable structure
-Epoch 10	...	...	most coherent
-这张表用来证明你们为什么选最终 checkpoint。
+Quick estimate of remaining time:
 
-3. DDPM vs DDIM table
-这个最重要：
+```bash
+/media/volume/mmci/bozhu/11685/tools/miniconda3/envs/intro2dl/bin/python - <<'PY'
+import json, statistics
+from pathlib import Path
 
-Sampler	Steps	FID@1000	Time	Notes
-DDPM	200	...	...	baseline
-DDIM	200	...	...	similar quality, faster/slightly different
-DDIM	100	...	...	good trade-off
-DDIM	50	...	...	fastest, some quality drop
-这个表基本就是 midterm 的核心 quantitative result。
+run = Path("output/train_runs/<run>/metrics.jsonl")
+rows = [json.loads(x) for x in run.read_text().splitlines() if x.strip()]
+rows = [x for x in rows if x.get("type") == "train"]
+last = rows[-1]
+recent = rows[-20:]
+sps = statistics.mean(x["seconds_per_step"] for x in recent if x["global_step"] > 1)
+total_steps = 150000
+steps_per_epoch = 8125
 
-九、你们 midterm 最少应该做哪些实验
-如果时间紧，我建议最少做这 4 个：
+print("current step:", last["global_step"])
+print("sec/step:", sps)
+print("one epoch min:", steps_per_epoch * sps / 60)
+print("remaining hours:", (total_steps - last["global_step"]) * sps / 3600)
+PY
+```
 
-训练 1 个 baseline DDPM
-挑 1 个 best checkpoint
-用 DDPM 200 steps 生成 1000 张，算 FID
-用 DDIM 100 steps 和 DDIM 50 steps 生成 1000 张，算 FID并比较时间
-这样已经足够写出一版完整的 midterm 结果。
+## Smoke Tests
 
-如果时间再多一点，就加：
+Pixel DDPM one-step smoke:
 
-checkpoint comparison：epoch 2 / 5 / 10
-DDIM 200 steps 也一起比
-十、你们报告里应该怎么描述 baseline
-baseline 不要写得太复杂。最简单就是：
+```bash
+cd /media/volume/mmci/bozhu/11685/Project/src
+source /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/activate intro2dl
+WANDB_MODE=offline python train.py \
+  --config configs/ddpm_a100_40gb.yaml \
+  --run_name ddpm_smoke \
+  --max_train_steps 1 \
+  --batch_size 2 \
+  --num_inference_steps 2 \
+  --log_every 1
+```
 
-baseline model: unconditional pixel-space DDPM with U-Net denoiser
-baseline sampler: standard DDPM reverse process with 200 inference steps
-然后 improvement 写成：
+Latent CFG one-step smoke:
 
-same trained model with DDIM sampler for accelerated inference
-这样逻辑最干净。
+```bash
+WANDB_MODE=offline python train.py \
+  --config configs/latent_cfg_a100_40gb.yaml \
+  --run_name latent_cfg_smoke \
+  --max_train_steps 1 \
+  --batch_size 2 \
+  --num_inference_steps 2 \
+  --log_every 1
+```
 
-十一、一个很实用的执行顺序
-如果你们现在就开始做，我建议按下面顺序跑：
+Full tests:
 
-先训练 baseline DDPM
-看 epoch sample grids，选 1 到 3 个 checkpoint
-把 inference 数量临时改成 1000
-对 best checkpoint 跑 DDPM 200
-对同一个 checkpoint 跑 DDIM 200 / 100 / 50
-每次记录时间
-每次生成完用 reference stats 算 FID
-最后做表格和 sample figure
-十二、你们最后在 midterm 中最可能写出的结论
-一版很自然的结论会是：
+```bash
+cd /media/volume/mmci/bozhu/11685/Project
+PYTHONPATH=src /media/volume/mmci/bozhu/11685/tools/miniconda3/bin/conda run -n intro2dl python -m pytest -q src/tests
+```
 
-DDPM training loss steadily decreases and generated samples become progressively more structured over epochs.
-The best checkpoint is selected based on both qualitative inspection and reduced-sample FID.
-DDIM enables substantially faster inference than DDPM.
-With 100 inference steps, DDIM achieves a good quality-speed trade-off.
-With 50 steps, DDIM is faster but introduces a noticeable drop in image quality.
-十三、一个很重要的现实提醒
-按你们当前代码状态，midterm 最好不要把实验范围扩展到：
+## Git Notes
 
-latent DDPM
-CFG
-大量 architecture ablation
-因为这两项在当前代码里还没真正打通。midterm 把 DDPM 和 DDIM 做扎实，反而更稳、更像一个完成度高的阶段报告。
+The repo is pushed to GitHub from `main`. On this machine, use the repo-local SSH key:
 
-如果你愿意，我下一条可以直接给你：
+```bash
+git config core.sshCommand 'ssh -i ~/.ssh/github_bozhu -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
+```
 
-一版 实验计划表
-一版 Results 表格模板
-一版 Analysis 怎么写
-这样你可以直接开始填报告。
+Normal push:
 
+```bash
+git status -sb
+git add <source files only>
+git commit -m "your message"
+git push origin main
+```
+
+Do not commit generated training outputs unless explicitly needed:
+
+```text
+output/
+src/wandb/
+wandb/
+__pycache__/
+*.log
+```
+
+`src/tea_debug.log` is a local debug log and should stay uncommitted unless there is a specific reason.
+
+## Known Caveats
+
+- Current pixel DDPM is the safest route for a Kaggle backup.
+- Latent CFG code runs, but final quality depends heavily on VAE quality.
+- Previous VAE local FID was poor (`fid_1000_vs_validation = 412.6947`), so do not assume latent results will beat pixel DDPM.
+- The current training loop does not compute FID automatically. Run FID separately after checkpoints are saved.
+- `num_epochs` can be larger than the actual run length because `max_train_steps` is the real stopping condition.
 
