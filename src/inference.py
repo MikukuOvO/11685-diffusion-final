@@ -11,6 +11,7 @@ from models import UNet, VAE, ClassEmbedder
 from schedulers import DDPMScheduler, DDIMScheduler
 from pipelines import DDPMPipeline
 from utils import seed_everything, load_checkpoint
+from train import build_vae_from_args, infer_latent_shape, load_vae_weights
 
 
 logger = get_logger(__name__)
@@ -67,6 +68,11 @@ def generate_unconditional_batches(
     return torch.cat(all_images, dim=0)
 
 
+def make_class_batch(start, batch_size, num_classes):
+    # Kaggle expects 5000 images for 100 classes, i.e. 50 per class.
+    return [((start + offset) // 50) % num_classes for offset in range(batch_size)]
+
+
 def main():
     from train import parse_args
 
@@ -74,11 +80,6 @@ def main():
     args = parse_args()
     if args.ckpt is None:
         raise ValueError("Please provide `--ckpt` for inference.")
-    if args.latent_ddpm:
-        raise NotImplementedError("This inference script currently supports only pixel-space DDPM/DDIM.")
-    if args.use_cfg:
-        raise NotImplementedError("This inference script currently supports only unconditional DDPM/DDIM.")
-
     # setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -93,6 +94,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     generator = torch.Generator(device=device)
     generator.manual_seed(args.seed)
+
+    vae = None
+    if args.latent_ddpm:
+        vae = build_vae_from_args(args)
+        load_vae_weights(vae, args.vae_ckpt)
+        vae.eval()
+        vae = vae.to(device)
+        args.unet_in_ch, args.unet_in_size = infer_latent_shape(vae, args.image_size, device)
 
     # setup model
     logger.info("Creating model")
@@ -113,15 +122,13 @@ def main():
 
     scheduler = build_scheduler(args, device)
 
-    vae = None
-    if args.latent_ddpm and VAE is not None:
-        vae = VAE()
-        vae.init_from_ckpt('pretrained/model.ckpt')
-        vae.eval()
-
     class_embedder = None
     if args.use_cfg and ClassEmbedder is not None:
-        class_embedder = ClassEmbedder(None)
+        class_embedder = ClassEmbedder(
+            args.unet_ch,
+            n_classes=args.num_classes,
+            cond_drop_rate=args.cond_drop_rate,
+        )
 
     # send to device
     unet = unet.to(device)
@@ -136,20 +143,44 @@ def main():
     if class_embedder is not None:
         class_embedder.eval()
 
-    pipeline = DDPMPipeline(unet, scheduler, vae=vae, class_embedder=class_embedder)
+    pipeline = DDPMPipeline(
+        unet,
+        scheduler,
+        vae=vae,
+        class_embedder=class_embedder,
+        vae_scale_factor=args.vae_scale_factor,
+    )
 
     logger.info("***** Running Inference *****")
-    total_images = 1000
+    total_images = args.total_images
     save_dir = os.path.join(os.path.dirname(args.ckpt), "generated_images")
-    all_images = generate_unconditional_batches(
-        pipeline=pipeline,
-        total_images=total_images,
-        batch_size=args.batch_size,
-        num_inference_steps=args.num_inference_steps,
-        generator=generator,
-        device=device,
-        save_dir=save_dir,
-    )
+    if args.use_cfg:
+        all_images = []
+        for start in tqdm(range(0, total_images, args.batch_size), desc="Generating images"):
+            current_batch_size = min(args.batch_size, total_images - start)
+            classes = make_class_batch(start, current_batch_size, args.num_classes)
+            gen_images = pipeline(
+                batch_size=current_batch_size,
+                num_inference_steps=args.num_inference_steps,
+                classes=classes,
+                guidance_scale=args.cfg_guidance_scale,
+                generator=generator,
+                device=device,
+            )
+            save_images(gen_images, save_dir, start_index=start)
+            gen_tensors = [pil_to_tensor(image).float() / 255.0 for image in gen_images]
+            all_images.append(torch.stack(gen_tensors, dim=0))
+        all_images = torch.cat(all_images, dim=0)
+    else:
+        all_images = generate_unconditional_batches(
+            pipeline=pipeline,
+            total_images=total_images,
+            batch_size=args.batch_size,
+            num_inference_steps=args.num_inference_steps,
+            generator=generator,
+            device=device,
+            save_dir=save_dir,
+        )
 
     logger.info(f"Generated {all_images.shape[0]} images")
     logger.info(f"Saved generated images to {save_dir}")

@@ -1,6 +1,5 @@
-import torch 
+import torch
 import torch.nn as nn
-from contextlib import contextmanager
 
 from .vae_modules import Encoder, Decoder
 from .vae_distributions import DiagonalGaussianDistribution
@@ -26,26 +25,55 @@ class VAE(nn.Module):
         self.quant_conv = torch.nn.Conv2d(2*z_channels, 2*embed_dim, 1)
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, z_channels, 1)
 
+    def encode_to_posterior(self, x):
+        h = self.encoder(x)
+        moments = self.quant_conv(h)
+        return DiagonalGaussianDistribution(moments)
+
+    def decode_latents(self, z):
+        z = self.post_quant_conv(z)
+        return self.decoder(z)
+
     @torch.no_grad()
     def encode(self, x):
-        # TODO: Implemente the encode function transforms images into a sampled vector from
-        h = None
-        moments = None 
-        
-        # sample from Gaussian using re-parameterization trick
-        posterior = DiagonalGaussianDistribution(moments)
-        posterior = posterior.sample()
-        return posterior
+        posterior = self.encode_to_posterior(x)
+        return posterior.sample()
 
     @torch.no_grad()
     def decode(self, z):
-        # TODO: reconstruct images from latent
-        z = None 
-        dec = None
+        return self.decode_latents(z)
+
+    def forward(self, x, sample_posterior=True):
+        posterior = self.encode_to_posterior(x)
+        if sample_posterior:
+            z = posterior.sample()
+        else:
+            z = posterior.mode()
+        dec = self.decode_latents(z)
+        return dec, posterior
+
+    @torch.no_grad()
+    def reconstruct(self, x, sample_posterior=False):
+        dec, _ = self.forward(x, sample_posterior=sample_posterior)
         return dec
 
+    @torch.no_grad()
+    def sample(self, batch_size, device=None, generator=None):
+        if device is None:
+            device = next(self.parameters()).device
+        else:
+            device = torch.device(device)
+        latent_h, latent_w = self.decoder.z_shape[-2:]
+        latent_ch = self.post_quant_conv.in_channels
+        z = torch.randn(
+            (batch_size, latent_ch, latent_h, latent_w),
+            generator=generator,
+            device=device,
+        )
+        return self.decode(z)
+
     def init_from_ckpt(self, path, ignore_keys=list()):
-        sd = torch.load(path, map_location="cpu")["state_dict"]
+        sd = torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
         keys = list(sd.keys())
         for k in keys:
             for ik in ignore_keys:

@@ -4,12 +4,17 @@ import os
 def load_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=None, checkpoint_path='checkpoints/checkpoint.pth'):
     
     print("loading checkpoint")
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     
     print("loading unet")
     unet.load_state_dict(checkpoint['unet_state_dict'])
     print("loading scheduler")
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    scheduler_state_dict = {
+        key: value
+        for key, value in checkpoint['scheduler_state_dict'].items()
+        if key != 'timesteps'
+    }
+    scheduler.load_state_dict(scheduler_state_dict, strict=False)
     
     if vae is not None and 'vae_state_dict' in checkpoint:
         print("loading vae")
@@ -18,9 +23,10 @@ def load_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=No
     if class_embedder is not None and 'class_embedder_state_dict' in checkpoint:
         print("loading class_embedder")
         class_embedder.load_state_dict(checkpoint['class_embedder_state_dict'])
-    
-    
-        
+
+    if optimizer is not None and 'optimizer_state_dict' in checkpoint:
+        print("loading optimizer")
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
 def save_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=None, epoch=None, save_dir='checkpoints'):
     if not os.path.exists(save_dir):

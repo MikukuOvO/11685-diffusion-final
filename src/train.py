@@ -1,7 +1,9 @@
 import os 
 import sys 
 import argparse
+import json
 import math
+import time
 import numpy as np
 import ruamel.yaml as yaml
 import torch
@@ -58,6 +60,7 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="weight decay")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="gradient clip")
+    parser.add_argument("--log_every", type=int, default=100, help="training metric logging frequency in steps")
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument("--mixed_precision", type=str, default='none', choices=['fp16', 'bf16', 'fp32', 'none'], help='mixed precision')
     
@@ -83,16 +86,28 @@ def parse_args():
     
     # vae
     parser.add_argument("--latent_ddpm", type=str2bool, default=False, help="use vqvae for latent ddpm")
+    parser.add_argument("--vae_ckpt", type=str, default=None, help="checkpoint path for the VAE used by latent DDPM")
+    parser.add_argument("--vae_scale_factor", type=float, default=0.1845, help="latent scale factor")
+    parser.add_argument("--vae_double_z", type=str2bool, default=True)
+    parser.add_argument("--vae_z_channels", type=int, default=3)
+    parser.add_argument("--vae_embed_dim", type=int, default=3)
+    parser.add_argument("--vae_in_channels", type=int, default=3)
+    parser.add_argument("--vae_out_ch", type=int, default=3)
+    parser.add_argument("--vae_ch", type=int, default=128)
+    parser.add_argument("--vae_ch_mult", type=int, nargs="+", default=[1, 2, 4])
+    parser.add_argument("--vae_num_res_blocks", type=int, default=2)
     
     # cfg
     parser.add_argument("--use_cfg", type=str2bool, default=False, help="use cfg for conditional (latent) ddpm")
     parser.add_argument("--cfg_guidance_scale", type=float, default=2.0, help="cfg for inference")
+    parser.add_argument("--cond_drop_rate", type=float, default=0.1, help="class dropout probability for CFG training")
     
     # ddim sampler for inference
     parser.add_argument("--use_ddim", type=str2bool, default=False, help="use ddim sampler for inference")
     
     # checkpoint path for inference
     parser.add_argument("--ckpt", type=str, default=None, help="checkpoint path for inference")
+    parser.add_argument("--total_images", type=int, default=5000, help="number of images to generate during inference")
     
     # first parse of command-line args to check for config file
     args = parser.parse_args()
@@ -107,6 +122,53 @@ def parse_args():
     # re-parse command-line args to overwrite with any command-line inputs
     args = parser.parse_args()
     return args
+
+
+def build_vae_from_args(args):
+    return VAE(
+        double_z=args.vae_double_z,
+        z_channels=args.vae_z_channels,
+        embed_dim=args.vae_embed_dim,
+        resolution=args.image_size,
+        in_channels=args.vae_in_channels,
+        out_ch=args.vae_out_ch,
+        ch=args.vae_ch,
+        ch_mult=args.vae_ch_mult,
+        num_res_blocks=args.vae_num_res_blocks,
+    )
+
+
+def load_vae_weights(vae, checkpoint_path):
+    if checkpoint_path is None:
+        default_path = "pretrained/model.ckpt"
+        if os.path.exists(default_path):
+            checkpoint_path = default_path
+        else:
+            raise ValueError("`--vae_ckpt` is required for latent DDPM when pretrained/model.ckpt is unavailable.")
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "vae_state_dict" in checkpoint:
+        vae.load_state_dict(checkpoint["vae_state_dict"])
+    elif "state_dict" in checkpoint:
+        vae.load_state_dict(checkpoint["state_dict"], strict=False)
+    else:
+        vae.load_state_dict(checkpoint)
+
+
+def infer_latent_shape(vae, image_size, device):
+    was_training = vae.training
+    vae.eval()
+    with torch.no_grad():
+        dummy = torch.zeros(1, 3, image_size, image_size, device=device)
+        latent = vae.encode(dummy)
+    if was_training:
+        vae.train()
+    return latent.shape[1], latent.shape[2]
+
+
+def append_jsonl(path, payload):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, sort_keys=True) + "\n")
     
     
 def main():
@@ -114,11 +176,6 @@ def main():
     # parse arguments
     args = parse_args()
 
-    if args.latent_ddpm:
-        raise NotImplementedError("This training script currently supports only pixel-space DDPM.")
-    if args.use_cfg:
-        raise NotImplementedError("This training script currently supports only unconditional DDPM.")
-    
     # seed everything
     seed_everything(args.seed)
     
@@ -192,7 +249,18 @@ def main():
     if is_primary(args):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(os.path.join(output_dir, "samples"), exist_ok=True)
     
+    vae = None
+    if args.latent_ddpm:
+        vae = build_vae_from_args(args)
+        load_vae_weights(vae, args.vae_ckpt)
+        vae.eval()
+        for param in vae.parameters():
+            param.requires_grad = False
+        vae = vae.to(device)
+        args.unet_in_ch, args.unet_in_size = infer_latent_shape(vae, args.image_size, device)
+
     # setup model
     logger.info("Creating model")
     # unet
@@ -214,31 +282,27 @@ def main():
         clip_sample_range=args.clip_sample_range,
     )
     
-    # NOTE: this is for latent DDPM 
-    vae = None
-    if args.latent_ddpm:
-        vae = VAE()
-        # NOTE: do not change this
-        vae.init_from_ckpt('pretrained/model.ckpt')
-        vae.eval()
-        
     # Note: this is for cfg
     class_embedder = None
     if args.use_cfg:
-        # TODO: 
-        class_embedder = ClassEmbedder(None)
+        class_embedder = ClassEmbedder(
+            args.unet_ch,
+            n_classes=args.num_classes,
+            cond_drop_rate=args.cond_drop_rate,
+        )
         
     # send to device
     unet = unet.to(device)
     diffusion_scheduler = diffusion_scheduler.to(device)
-    if vae:
-        vae = vae.to(device)
     if class_embedder:
         class_embedder = class_embedder.to(device)
     
     # TODO: setup optimizer
+    trainable_params = list(unet.parameters())
+    if class_embedder is not None:
+        trainable_params += list(class_embedder.parameters())
     optimizer = torch.optim.AdamW(
-        unet.parameters(),
+        trainable_params,
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
@@ -293,7 +357,13 @@ def main():
     
     # TODO: setup evaluation pipeline
     # NOTE: this pipeline is not differentiable and only for evaluatin
-    pipeline = DDPMPipeline(unet_wo_ddp, eval_scheduler, vae=vae_wo_ddp, class_embedder=class_embedder_wo_ddp)
+    pipeline = DDPMPipeline(
+        unet_wo_ddp,
+        eval_scheduler,
+        vae=vae_wo_ddp,
+        class_embedder=class_embedder_wo_ddp,
+        vae_scale_factor=args.vae_scale_factor,
+    )
     
     
     # dump config file
@@ -303,6 +373,9 @@ def main():
             # Use the round_trip_dump method to preserve the order and style
             file_yaml = yaml.YAML()
             file_yaml.dump(experiment_config, f)
+        metrics_path = os.path.join(output_dir, "metrics.jsonl")
+    else:
+        metrics_path = None
     
     # start tracker
     if is_primary(args):
@@ -326,6 +399,7 @@ def main():
     progress_bar = tqdm(range(args.max_train_steps), disable=not is_primary(args))
     completed_steps = 0
     stop_training = False
+    last_log_time = time.perf_counter()
 
     # training
     for epoch in range(args.num_epochs):
@@ -361,9 +435,12 @@ def main():
             # NOTE: this is for latent DDPM 
             if vae is not None:
                 # use vae to encode images as latents
-                images = vae.encode(images)
+                with torch.no_grad():
+                    images = vae.encode(images)
                 # NOTE: do not change  this line, this is to ensure the latent has unit std
-                images = images * 0.1845
+                images = images * args.vae_scale_factor
+            batch_mean = images.detach().mean()
+            batch_std = images.detach().std()
             
             # TODO: zero grad optimizer
             optimizer.zero_grad(set_to_none=True)
@@ -372,7 +449,7 @@ def main():
             # NOTE: this is for CFG
             if class_embedder is not None:
                 # TODO: use class embedder to get class embeddings
-                class_emb = None 
+                class_emb = class_embedder(labels)
             else:
                 # NOTE: if not cfg, set class_emb to None
                 class_emb = None
@@ -412,7 +489,16 @@ def main():
             loss.backward()
             # TODO: grad clip
             if args.grad_clip:
-                torch.nn.utils.clip_grad_norm_(unet.parameters(), args.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
+            else:
+                grad_norm = torch.norm(
+                    torch.stack([
+                        p.grad.detach().norm(2)
+                        for p in trainable_params
+                        if p.grad is not None
+                    ]),
+                    2,
+                )
             
             # TODO: step your optimizer
             optimizer.step()
@@ -423,9 +509,45 @@ def main():
             completed_steps += 1
             
             # logger
-            if step % 100 == 0 and is_primary(args):
-                logger.info(f"Epoch {epoch+1}/{args.num_epochs}, Step {step}/{num_update_steps_per_epoch}, Loss {loss.item()} ({loss_m.avg})")
-                wandb_logger.log({'loss': loss_m.avg})
+            if step % args.log_every == 0 and is_primary(args):
+                now = time.perf_counter()
+                seconds_per_step = (now - last_log_time) / max(1, args.log_every)
+                last_log_time = now
+                lr = optimizer.param_groups[0]["lr"]
+                grad_norm_value = float(grad_norm.detach().cpu()) if torch.is_tensor(grad_norm) else float(grad_norm)
+                metrics = {
+                    "epoch": epoch,
+                    "step_in_epoch": step,
+                    "global_step": completed_steps,
+                    "loss_step": float(loss.detach().cpu()),
+                    "loss_avg": float(loss_m.avg),
+                    "lr": float(lr),
+                    "grad_norm": grad_norm_value,
+                    "batch_mean": float(batch_mean.detach().cpu()),
+                    "batch_std": float(batch_std.detach().cpu()),
+                    "timestep_mean": float(timesteps.float().mean().detach().cpu()),
+                    "timestep_min": int(timesteps.min().detach().cpu()),
+                    "timestep_max": int(timesteps.max().detach().cpu()),
+                    "seconds_per_step": float(seconds_per_step),
+                }
+                logger.info(
+                    f"Epoch {epoch+1}/{args.num_epochs}, Step {step}/{num_update_steps_per_epoch}, "
+                    f"Global Step {completed_steps}, Loss {loss.item():.6f} ({loss_m.avg:.6f}), "
+                    f"LR {lr:.2e}, GradNorm {grad_norm_value:.4f}, Sec/Step {seconds_per_step:.4f}"
+                )
+                wandb_logger.log({
+                    "train/loss_step": metrics["loss_step"],
+                    "train/loss_avg": metrics["loss_avg"],
+                    "train/lr": metrics["lr"],
+                    "train/grad_norm": metrics["grad_norm"],
+                    "train/batch_mean": metrics["batch_mean"],
+                    "train/batch_std": metrics["batch_std"],
+                    "train/timestep_mean": metrics["timestep_mean"],
+                    "train/seconds_per_step": metrics["seconds_per_step"],
+                    "global_step": metrics["global_step"],
+                    "epoch": metrics["epoch"],
+                }, step=completed_steps)
+                append_jsonl(metrics_path, {"type": "train", **metrics})
 
             if completed_steps >= args.max_train_steps:
                 stop_training = True
@@ -439,6 +561,8 @@ def main():
         gen_images = pipeline(
             batch_size=4,
             num_inference_steps=args.num_inference_steps,
+            classes=[0, 1, 2, 3] if args.use_cfg else None,
+            guidance_scale=args.cfg_guidance_scale if args.use_cfg else None,
             generator=generator,
             device=device,
         )
@@ -453,7 +577,21 @@ def main():
         
         # Send to wandb
         if is_primary(args):
-            wandb_logger.log({'gen_images': wandb.Image(grid_image)})
+            sample_path = os.path.join(output_dir, "samples", f"epoch_{epoch:04d}.png")
+            grid_image.save(sample_path)
+            epoch_metrics = {
+                "epoch": epoch,
+                "global_step": completed_steps,
+                "loss_avg": float(loss_m.avg),
+                "sample_path": sample_path,
+            }
+            wandb_logger.log({
+                "eval/gen_images": wandb.Image(grid_image),
+                "eval/loss_avg_epoch": epoch_metrics["loss_avg"],
+                "global_step": completed_steps,
+                "epoch": epoch,
+            }, step=completed_steps)
+            append_jsonl(metrics_path, {"type": "epoch", **epoch_metrics})
             
         # save checkpoint
         if is_primary(args):

@@ -8,9 +8,11 @@ from utils import randn_tensor
 
 
 class DDPMPipeline:
-    def __init__(self, unet, scheduler, vae=None, class_embedder=None):
+    def __init__(self, unet, scheduler, vae=None, class_embedder=None, vae_scale_factor=0.1845):
         self.unet = unet
         self.scheduler = scheduler
+        self.class_embedder = None
+        self.vae_scale_factor = vae_scale_factor
         
         # NOTE: this is for latent DDPM
         self.vae = None
@@ -75,10 +77,21 @@ class DDPMPipeline:
             device = torch.device(device)
         
         # NOTE: this is for CFG
+        class_emb = None
+        uncond_emb = None
+        if self.class_embedder is not None and classes is None:
+            raise ValueError("A class-conditional pipeline requires `classes` for sampling.")
         if classes is not None:
-            raise NotImplementedError("Class-conditional sampling is not implemented in the midterm pipeline.")
-        if guidance_scale not in (None, 1.0):
-            raise NotImplementedError("Guidance scaling is not implemented in the midterm pipeline.")
+            if self.class_embedder is None:
+                raise ValueError("`classes` were provided, but no class embedder is attached to the pipeline.")
+            if isinstance(classes, int):
+                classes = [classes] * batch_size
+            if len(classes) != batch_size:
+                raise ValueError("`classes` must be an int or a list with length equal to `batch_size`.")
+            class_labels = torch.tensor(classes, dtype=torch.long, device=device)
+            class_emb = self.class_embedder(class_labels)
+            if guidance_scale not in (None, 1.0):
+                uncond_emb = self.class_embedder.unconditional_embedding(batch_size, device)
         
         # TODO: starts with random noise
         image = randn_tensor(image_shape, generator=generator, device=device)
@@ -91,7 +104,12 @@ class DDPMPipeline:
             model_input = image
 
             # TODO: 1. predict noise model_output
-            model_output = self.unet(model_input, t, c=None)
+            if uncond_emb is not None:
+                noise_uncond = self.unet(model_input, t, c=uncond_emb)
+                noise_cond = self.unet(model_input, t, c=class_emb)
+                model_output = noise_uncond + guidance_scale * (noise_cond - noise_uncond)
+            else:
+                model_output = self.unet(model_input, t, c=class_emb)
             
             # TODO: 2. compute previous image: x_t -> x_t-1 using scheduler
             image = self.scheduler.step(model_output, int(t), image, generator=generator)
@@ -101,7 +119,7 @@ class DDPMPipeline:
         # TODO: use VQVAE to get final image
         if self.vae is not None:
             # NOTE: remember to rescale your images
-            image = image / 0.1845
+            image = image / self.vae_scale_factor
             image = self.vae.decode(image)
             # TODO: clamp your images values
             image = image.clamp(-1.0, 1.0)
@@ -115,4 +133,3 @@ class DDPMPipeline:
         
         return image
         
-
