@@ -1,10 +1,12 @@
 import argparse
+import json
 import os
 from pathlib import Path
 
 import ruamel.yaml as yaml
 import torch
 import torch.nn.functional as F
+import wandb
 from PIL import Image
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
@@ -113,6 +115,19 @@ def save_image_row(images, output_path):
     canvas.save(output_path)
 
 
+def append_jsonl(path, payload):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def normalized_kl_loss(posterior):
+    # `posterior.kl()` sums over latent dimensions per sample. Normalize by the
+    # number of latent elements so beta_kl has a meaningful scale alongside MSE.
+    per_sample_kl = posterior.kl()
+    latent_elements = posterior.mean[0].numel()
+    return per_sample_kl.mean() / latent_elements
+
+
 def main():
     args = parse_args()
     seed_everything(args.seed)
@@ -148,8 +163,23 @@ def main():
     run_dir = output_root / run_name
     checkpoint_dir = run_dir / "checkpoints"
     sample_dir = run_dir / "samples"
+    metrics_path = run_dir / "metrics.jsonl"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     sample_dir.mkdir(parents=True, exist_ok=True)
+
+    wandb_logger = None
+    wandb_project = os.environ.get("WANDB_PROJECT")
+    if wandb_project:
+        wandb_init_kwargs = {
+            "project": wandb_project,
+            "name": run_name,
+            "config": vars(args),
+            "dir": os.environ.get("WANDB_DIR", str(run_dir)),
+        }
+        wandb_entity = os.environ.get("WANDB_ENTITY")
+        if wandb_entity:
+            wandb_init_kwargs["entity"] = wandb_entity
+        wandb_logger = wandb.init(**wandb_init_kwargs)
 
     fixed_images, _ = next(iter(loader))
     fixed_images = fixed_images[:args.sample_batch_size].to(device)
@@ -175,12 +205,23 @@ def main():
             reconstructions, posterior = model(images, sample_posterior=True)
 
             rec_loss = F.mse_loss(reconstructions, images)
-            kl_loss = posterior.kl().mean()
+            kl_loss = normalized_kl_loss(posterior)
             loss = rec_loss + args.beta_kl * kl_loss
+            if not torch.isfinite(loss):
+                raise ValueError(f"Encountered non-finite loss at epoch {epoch}: {loss.item()}")
 
             loss.backward()
             if args.grad_clip:
-                clip_grad_norm_(model.parameters(), args.grad_clip)
+                grad_norm = clip_grad_norm_(model.parameters(), args.grad_clip)
+            else:
+                grad_norm = torch.norm(
+                    torch.stack([
+                        p.grad.detach().norm(2)
+                        for p in model.parameters()
+                        if p.grad is not None
+                    ]),
+                    2,
+                )
             optimizer.step()
 
             batch_size = images.size(0)
@@ -194,6 +235,33 @@ def main():
             )
 
             completed_steps += 1
+            step_metrics = {
+                "epoch": epoch,
+                "global_step": completed_steps,
+                "loss_step": float(loss.detach().cpu()),
+                "loss_avg": float(loss_meter.avg),
+                "rec_loss_step": float(rec_loss.detach().cpu()),
+                "rec_loss_avg": float(rec_meter.avg),
+                "kl_loss_step": float(kl_loss.detach().cpu()),
+                "kl_loss_avg": float(kl_meter.avg),
+                "grad_norm": float(grad_norm.detach().cpu()) if torch.is_tensor(grad_norm) else float(grad_norm),
+            }
+            append_jsonl(metrics_path, {"type": "train", **step_metrics})
+            if wandb_logger is not None:
+                wandb_logger.log(
+                    {
+                        "train/loss_step": step_metrics["loss_step"],
+                        "train/loss_avg": step_metrics["loss_avg"],
+                        "train/rec_loss_step": step_metrics["rec_loss_step"],
+                        "train/rec_loss_avg": step_metrics["rec_loss_avg"],
+                        "train/kl_loss_step": step_metrics["kl_loss_step"],
+                        "train/kl_loss_avg": step_metrics["kl_loss_avg"],
+                        "train/grad_norm": step_metrics["grad_norm"],
+                        "epoch": step_metrics["epoch"],
+                        "global_step": step_metrics["global_step"],
+                    },
+                    step=completed_steps,
+                )
             if args.max_train_steps is not None and completed_steps >= args.max_train_steps:
                 stop_training = True
                 break
@@ -217,12 +285,52 @@ def main():
         save_image_row(recon_row, sample_dir / f"reconstruction_epoch_{epoch}.png")
         save_image_row(sample_row, sample_dir / f"sample_epoch_{epoch}.png")
 
+        reconstruction_path = sample_dir / f"reconstruction_epoch_{epoch}.png"
+        sample_path = sample_dir / f"sample_epoch_{epoch}.png"
+        epoch_metrics = {
+            "epoch": epoch,
+            "global_step": completed_steps,
+            "loss_avg": float(loss_meter.avg),
+            "rec_loss_avg": float(rec_meter.avg),
+            "kl_loss_avg": float(kl_meter.avg),
+            "reconstruction_path": str(reconstruction_path),
+            "sample_path": str(sample_path),
+        }
+        append_jsonl(metrics_path, {"type": "epoch", **epoch_metrics})
+
+        if wandb_logger is not None:
+            reconstruction_image = wandb.Image(str(reconstruction_path), caption=f"epoch_{epoch}_reconstruction")
+            sample_image = wandb.Image(str(sample_path), caption=f"epoch_{epoch}_sample")
+            wandb_logger.log(
+                {
+                    "eval/reconstruction": reconstruction_image,
+                    "eval/sample": sample_image,
+                    "eval/loss_avg_epoch": epoch_metrics["loss_avg"],
+                    "eval/rec_loss_avg_epoch": epoch_metrics["rec_loss_avg"],
+                    "eval/kl_loss_avg_epoch": epoch_metrics["kl_loss_avg"],
+                    "epoch": epoch,
+                    "global_step": completed_steps,
+                },
+                step=completed_steps,
+            )
+            # Keep a latest snapshot in the run summary while preserving full history in the logs.
+            wandb_logger.summary["latest_epoch"] = epoch
+            wandb_logger.summary["latest_global_step"] = completed_steps
+            wandb_logger.summary["latest_loss_avg"] = epoch_metrics["loss_avg"]
+            wandb_logger.summary["latest_rec_loss_avg"] = epoch_metrics["rec_loss_avg"]
+            wandb_logger.summary["latest_kl_loss_avg"] = epoch_metrics["kl_loss_avg"]
+            wandb_logger.summary["latest_reconstruction"] = reconstruction_image
+            wandb_logger.summary["latest_sample"] = sample_image
+
         if (epoch + 1) % args.save_every == 0:
             save_vae_checkpoint(model, optimizer, epoch, checkpoint_dir)
 
         if stop_training:
             print(f"Reached max_train_steps={args.max_train_steps}. Stopping training early.")
             break
+
+    if wandb_logger is not None:
+        wandb_logger.finish()
 
 
 if __name__ == "__main__":

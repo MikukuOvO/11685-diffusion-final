@@ -1,6 +1,8 @@
 torchmetrics[image]
 ruamel.yaml
 wandb
+modal
+gdown
 scipy
 tqdm
 pandas
