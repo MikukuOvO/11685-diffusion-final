@@ -138,7 +138,14 @@ def main():
         class_embedder = class_embedder.to(device)
 
     # load checkpoint
-    load_checkpoint(unet, scheduler, vae=vae, class_embedder=class_embedder, checkpoint_path=args.ckpt)
+    load_checkpoint(
+        unet,
+        scheduler,
+        vae=vae,
+        class_embedder=class_embedder,
+        checkpoint_path=args.ckpt,
+        use_ema=args.use_ema,
+    )
     unet.eval()
     if class_embedder is not None:
         class_embedder.eval()

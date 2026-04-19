@@ -7,6 +7,18 @@ import numpy as np
 from utils import randn_tensor
 
 
+def betas_for_alpha_bar(num_train_timesteps, max_beta=0.999):
+    """Cosine schedule from Improved DDPM, discretized through alpha_bar(t)."""
+    betas = []
+    for i in range(num_train_timesteps):
+        t1 = i / num_train_timesteps
+        t2 = (i + 1) / num_train_timesteps
+        alpha_bar_t1 = np.cos((t1 + 0.008) / 1.008 * np.pi / 2) ** 2
+        alpha_bar_t2 = np.cos((t2 + 0.008) / 1.008 * np.pi / 2) ** 2
+        betas.append(min(1 - alpha_bar_t2 / alpha_bar_t1, max_beta))
+    return torch.tensor(betas, dtype=torch.float32)
+
+
 class DDPMScheduler(nn.Module):
     
     def __init__(
@@ -44,6 +56,8 @@ class DDPMScheduler(nn.Module):
         if self.beta_schedule == 'linear':
             # This is the DDPM implementation
             betas = torch.linspace(beta_start, beta_end, num_train_timesteps, dtype=torch.float32)
+        elif self.beta_schedule == 'cosine':
+            betas = betas_for_alpha_bar(num_train_timesteps)
         else:
             raise NotImplementedError(f"Beta schedule {self.beta_schedule} not implemented.")
         self.register_buffer("betas", betas)

@@ -1,13 +1,25 @@
-import torch
 import os
+import torch
 
-def load_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=None, checkpoint_path='checkpoints/checkpoint.pth'):
+def load_checkpoint(
+    unet,
+    scheduler,
+    vae=None,
+    class_embedder=None,
+    optimizer=None,
+    checkpoint_path='checkpoints/checkpoint.pth',
+    use_ema=False,
+):
     
     print("loading checkpoint")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     
-    print("loading unet")
-    unet.load_state_dict(checkpoint['unet_state_dict'])
+    unet_key = 'ema_unet_state_dict' if use_ema and 'ema_unet_state_dict' in checkpoint else 'unet_state_dict'
+    print(f"loading unet ({unet_key})")
+    unet_state_dict = checkpoint[unet_key]
+    if unet_key == 'ema_unet_state_dict' and 'shadow' in unet_state_dict:
+        unet_state_dict = unet_state_dict['shadow']
+    unet.load_state_dict(unet_state_dict, strict=False)
     print("loading scheduler")
     scheduler_state_dict = {
         key: value
@@ -28,7 +40,16 @@ def load_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=No
         print("loading optimizer")
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-def save_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=None, epoch=None, save_dir='checkpoints'):
+def save_checkpoint(
+    unet,
+    scheduler,
+    vae=None,
+    class_embedder=None,
+    optimizer=None,
+    epoch=None,
+    save_dir='checkpoints',
+    ema_unet=None,
+):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
@@ -39,6 +60,8 @@ def save_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=No
         'unet_state_dict': unet.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
     }
+    if ema_unet is not None:
+        checkpoint['ema_unet_state_dict'] = ema_unet.state_dict()
     
     if vae is not None:
         checkpoint['vae_state_dict'] = vae.state_dict()

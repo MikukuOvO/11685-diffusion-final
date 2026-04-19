@@ -39,6 +39,82 @@ def resolve_training_schedule(num_epochs, num_update_steps_per_epoch, max_train_
     return resolved_num_epochs, max_train_steps
 
 
+def build_lr_scheduler(optimizer, args):
+    scheduler_name = str(args.lr_scheduler).lower()
+    if scheduler_name in ("none", "constant"):
+        return None
+    if scheduler_name != "cosine":
+        raise NotImplementedError(f"LR scheduler {args.lr_scheduler} not implemented.")
+
+    warmup_steps = max(0, int(args.lr_warmup_steps))
+    max_train_steps = max(1, int(args.max_train_steps))
+    min_lr_ratio = float(args.min_lr) / float(args.learning_rate)
+
+    def lr_lambda(current_step):
+        if warmup_steps > 0 and current_step < warmup_steps:
+            return max(1e-8, float(current_step + 1) / float(warmup_steps))
+        progress = (current_step - warmup_steps) / max(1, max_train_steps - warmup_steps)
+        progress = min(max(progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+class EMAModel:
+    def __init__(self, model, decay=0.9999):
+        self.decay = decay
+        self.shadow = {
+            name: param.detach().clone()
+            for name, param in model.state_dict().items()
+            if torch.is_floating_point(param)
+        }
+
+    @torch.no_grad()
+    def update(self, model):
+        state_dict = model.state_dict()
+        for name, shadow_param in self.shadow.items():
+            shadow_param.mul_(self.decay).add_(state_dict[name].detach(), alpha=1.0 - self.decay)
+
+    def copy_to(self, model):
+        state_dict = model.state_dict()
+        for name, shadow_param in self.shadow.items():
+            state_dict[name].copy_(shadow_param)
+
+    def state_dict(self):
+        return {"decay": self.decay, "shadow": self.shadow}
+
+    def load_state_dict(self, state_dict):
+        self.decay = state_dict["decay"]
+        self.shadow = state_dict["shadow"]
+
+
+class use_ema_weights:
+    def __init__(self, model, ema):
+        self.model = model
+        self.ema = ema
+        self.backup = None
+
+    def __enter__(self):
+        if self.ema is None:
+            return self.model
+        self.backup = {
+            name: param.detach().clone()
+            for name, param in self.model.state_dict().items()
+            if torch.is_floating_point(param)
+        }
+        self.ema.copy_to(self.model)
+        return self.model
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.backup is None:
+            return False
+        state_dict = self.model.state_dict()
+        for name, backup_param in self.backup.items():
+            state_dict[name].copy_(backup_param)
+        return False
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a model.")
     
@@ -58,11 +134,18 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--max_train_steps", type=int, default=None, help="optional override for total training steps")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate")
+    parser.add_argument("--lr_scheduler", type=str, default="none", help="learning rate scheduler: none or cosine")
+    parser.add_argument("--lr_warmup_steps", type=int, default=0, help="linear warmup steps for lr scheduler")
+    parser.add_argument("--min_lr", type=float, default=0.0, help="minimum lr for cosine schedule")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="weight decay")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="gradient clip")
     parser.add_argument("--log_every", type=int, default=100, help="training metric logging frequency in steps")
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument("--mixed_precision", type=str, default='none', choices=['fp16', 'bf16', 'fp32', 'none'], help='mixed precision')
+    parser.add_argument("--use_ema", type=str2bool, default=False, help="maintain EMA copy of UNet weights")
+    parser.add_argument("--ema_decay", type=float, default=0.9999, help="EMA decay for UNet weights")
+    parser.add_argument("--ema_start_step", type=int, default=0, help="first optimizer step to update EMA")
+    parser.add_argument("--ema_update_every", type=int, default=1, help="EMA update interval in optimizer steps")
     
     # ddpm
     parser.add_argument("--num_train_timesteps", type=int, default=1000, help="ddpm training timesteps")
@@ -306,8 +389,6 @@ def main():
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
-    # TODO: setup scheduler
-    lr_scheduler = None 
     
     # max train steps
     num_update_steps_per_epoch = len(train_loader)
@@ -318,6 +399,8 @@ def main():
         num_update_steps_per_epoch,
         args.max_train_steps,
     )
+    lr_scheduler = build_lr_scheduler(optimizer, args)
+    ema_unet = EMAModel(unet, decay=args.ema_decay) if args.use_ema else None
     
     #  setup distributed training
     class_embedder_wo_ddp = class_embedder
@@ -504,6 +587,13 @@ def main():
             optimizer.step()
             if lr_scheduler is not None:
                 lr_scheduler.step()
+            next_completed_steps = completed_steps + 1
+            if (
+                ema_unet is not None
+                and next_completed_steps >= args.ema_start_step
+                and next_completed_steps % args.ema_update_every == 0
+            ):
+                ema_unet.update(unet_wo_ddp)
             
             progress_bar.update(1)
             completed_steps += 1
@@ -530,6 +620,8 @@ def main():
                     "timestep_max": int(timesteps.max().detach().cpu()),
                     "seconds_per_step": float(seconds_per_step),
                 }
+                if ema_unet is not None:
+                    metrics["ema_decay"] = float(ema_unet.decay)
                 logger.info(
                     f"Epoch {epoch+1}/{args.num_epochs}, Step {step}/{num_update_steps_per_epoch}, "
                     f"Global Step {completed_steps}, Loss {loss.item():.6f} ({loss_m.avg:.6f}), "
@@ -558,14 +650,15 @@ def main():
         unet.eval()
         generator = torch.Generator(device=device)
         generator.manual_seed(epoch + args.seed)
-        gen_images = pipeline(
-            batch_size=4,
-            num_inference_steps=args.num_inference_steps,
-            classes=[0, 1, 2, 3] if args.use_cfg else None,
-            guidance_scale=args.cfg_guidance_scale if args.use_cfg else None,
-            generator=generator,
-            device=device,
-        )
+        with use_ema_weights(unet_wo_ddp, ema_unet):
+            gen_images = pipeline(
+                batch_size=4,
+                num_inference_steps=args.num_inference_steps,
+                classes=[0, 1, 2, 3] if args.use_cfg else None,
+                guidance_scale=args.cfg_guidance_scale if args.use_cfg else None,
+                generator=generator,
+                device=device,
+            )
         
         # create a blank canvas for the grid
         grid_image = Image.new('RGB', (4 * args.image_size, 1 * args.image_size))
@@ -595,7 +688,16 @@ def main():
             
         # save checkpoint
         if is_primary(args):
-            save_checkpoint(unet_wo_ddp, scheduler_wo_ddp, vae_wo_ddp, class_embedder_wo_ddp, optimizer, epoch, save_dir=save_dir)
+            save_checkpoint(
+                unet_wo_ddp,
+                scheduler_wo_ddp,
+                vae_wo_ddp,
+                class_embedder_wo_ddp,
+                optimizer,
+                epoch,
+                save_dir=save_dir,
+                ema_unet=ema_unet,
+            )
 
         if stop_training:
             if is_primary(args):
