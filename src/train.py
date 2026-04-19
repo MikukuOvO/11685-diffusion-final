@@ -115,6 +115,29 @@ class use_ema_weights:
         return False
 
 
+def sample_grid(
+    pipeline,
+    image_size,
+    args,
+    generator,
+    device,
+):
+    gen_images = pipeline(
+        batch_size=4,
+        num_inference_steps=args.num_inference_steps,
+        classes=[0, 1, 2, 3] if args.use_cfg else None,
+        guidance_scale=args.cfg_guidance_scale if args.use_cfg else None,
+        generator=generator,
+        device=device,
+    )
+
+    grid_image = Image.new('RGB', (4 * image_size, image_size))
+    for i, image in enumerate(gen_images):
+        x = (i % 4) * image_size
+        grid_image.paste(image, (x, 0))
+    return grid_image
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a model.")
     
@@ -648,42 +671,56 @@ def main():
         # validation
         # send unet to evaluation mode
         unet.eval()
-        generator = torch.Generator(device=device)
-        generator.manual_seed(epoch + args.seed)
-        with use_ema_weights(unet_wo_ddp, ema_unet):
-            gen_images = pipeline(
-                batch_size=4,
-                num_inference_steps=args.num_inference_steps,
-                classes=[0, 1, 2, 3] if args.use_cfg else None,
-                guidance_scale=args.cfg_guidance_scale if args.use_cfg else None,
-                generator=generator,
-                device=device,
-            )
-        
-        # create a blank canvas for the grid
-        grid_image = Image.new('RGB', (4 * args.image_size, 1 * args.image_size))
-        # paste images into the grid
-        for i, image in enumerate(gen_images):
-            x = (i % 4) * args.image_size
-            y = 0
-            grid_image.paste(image, (x, y))
+        generator = torch.Generator(device=device).manual_seed(epoch + args.seed)
+        raw_grid_image = sample_grid(
+            pipeline,
+            args.image_size,
+            args,
+            generator,
+            device,
+        )
+        ema_grid_image = None
+        if ema_unet is not None:
+            generator = torch.Generator(device=device).manual_seed(epoch + args.seed)
+            with use_ema_weights(unet_wo_ddp, ema_unet):
+                ema_grid_image = sample_grid(
+                    pipeline,
+                    args.image_size,
+                    args,
+                    generator,
+                    device,
+                )
         
         # Send to wandb
         if is_primary(args):
+            sample_path_raw = os.path.join(output_dir, "samples", f"epoch_{epoch:04d}_raw.png")
+            raw_grid_image.save(sample_path_raw)
+            preferred_grid_image = ema_grid_image if ema_grid_image is not None else raw_grid_image
             sample_path = os.path.join(output_dir, "samples", f"epoch_{epoch:04d}.png")
-            grid_image.save(sample_path)
+            preferred_grid_image.save(sample_path)
+            sample_path_ema = None
+            if ema_grid_image is not None:
+                sample_path_ema = os.path.join(output_dir, "samples", f"epoch_{epoch:04d}_ema.png")
+                ema_grid_image.save(sample_path_ema)
             epoch_metrics = {
                 "epoch": epoch,
                 "global_step": completed_steps,
                 "loss_avg": float(loss_m.avg),
                 "sample_path": sample_path,
+                "sample_path_raw": sample_path_raw,
             }
-            wandb_logger.log({
-                "eval/gen_images": wandb.Image(grid_image),
+            if sample_path_ema is not None:
+                epoch_metrics["sample_path_ema"] = sample_path_ema
+            wandb_payload = {
+                "eval/gen_images": wandb.Image(preferred_grid_image),
+                "eval/gen_images_raw": wandb.Image(raw_grid_image),
                 "eval/loss_avg_epoch": epoch_metrics["loss_avg"],
                 "global_step": completed_steps,
                 "epoch": epoch,
-            }, step=completed_steps)
+            }
+            if ema_grid_image is not None:
+                wandb_payload["eval/gen_images_ema"] = wandb.Image(ema_grid_image)
+            wandb_logger.log(wandb_payload, step=completed_steps)
             append_jsonl(metrics_path, {"type": "epoch", **epoch_metrics})
             
         # save checkpoint
