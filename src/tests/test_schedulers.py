@@ -22,6 +22,17 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.previous_timestep(6), 3)
         self.assertEqual(scheduler.previous_timestep(0), -1)
 
+    def test_ddpm_cosine_schedule(self):
+        scheduler = DDPMScheduler(
+            num_train_timesteps=10,
+            beta_schedule="cosine",
+        )
+
+        self.assertEqual(scheduler.betas.shape, (10,))
+        self.assertTrue(torch.all(scheduler.betas > 0))
+        self.assertTrue(torch.all(scheduler.betas <= 0.999))
+        self.assertTrue(torch.all(scheduler.alphas_cumprod[1:] < scheduler.alphas_cumprod[:-1]))
+
     def test_ddpm_add_noise_matches_closed_form(self):
         scheduler = DDPMScheduler(num_train_timesteps=10)
         original = torch.ones(2, 3, 4, 4)
