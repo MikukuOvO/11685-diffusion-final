@@ -67,8 +67,16 @@ def build_vae(args):
 
 
 def load_vae_checkpoint(model, checkpoint_path):
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model.load_state_dict(checkpoint["vae_state_dict"])
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except Exception:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "vae_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["vae_state_dict"])
+    elif "state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["state_dict"], strict=False)
+    else:
+        model.load_state_dict(checkpoint, strict=False)
     return checkpoint
 
 

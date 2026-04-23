@@ -20,7 +20,7 @@ from torchvision.utils  import make_grid
 from models import UNet, VAE, ClassEmbedder
 from schedulers import DDPMScheduler, DDIMScheduler
 from pipelines import DDPMPipeline
-from utils import seed_everything, init_distributed_device, is_primary, AverageMeter, str2bool, save_checkpoint
+from utils import seed_everything, init_distributed_device, is_primary, AverageMeter, str2bool, save_checkpoint, EMAModel
 
 
 logger = get_logger(__name__)
@@ -50,6 +50,8 @@ def parse_args():
     parser.add_argument("--image_size", type=int, default=128, help="image size")
     parser.add_argument("--batch_size", type=int, default=4, help="per gpu batch size")
     parser.add_argument("--num_workers", type=int, default=8, help="batch size")
+    parser.add_argument("--persistent_workers", type=str2bool, default=True, help="keep dataloader workers alive across epochs")
+    parser.add_argument("--prefetch_factor", type=int, default=4, help="number of batches prefetched by each worker")
     parser.add_argument("--num_classes", type=int, default=100, help="number of classes in dataset")
 
     # training
@@ -63,6 +65,10 @@ def parse_args():
     parser.add_argument("--log_every", type=int, default=100, help="training metric logging frequency in steps")
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument("--mixed_precision", type=str, default='none', choices=['fp16', 'bf16', 'fp32', 'none'], help='mixed precision')
+    parser.add_argument("--use_ema", type=str2bool, default=False, help="track exponential moving average weights")
+    parser.add_argument("--ema_decay", type=float, default=0.9999, help="EMA decay used for shadow weights")
+    parser.add_argument("--ema_update_after_step", type=int, default=100, help="start EMA updates after this global step")
+    parser.add_argument("--ema_update_every", type=int, default=1, help="EMA update frequency in optimizer steps")
     
     # ddpm
     parser.add_argument("--num_train_timesteps", type=int, default=1000, help="ddpm training timesteps")
@@ -146,7 +152,10 @@ def load_vae_weights(vae, checkpoint_path):
         else:
             raise ValueError("`--vae_ckpt` is required for latent DDPM when pretrained/model.ckpt is unavailable.")
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except Exception:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if "vae_state_dict" in checkpoint:
         vae.load_state_dict(checkpoint["vae_state_dict"])
     elif "state_dict" in checkpoint:
@@ -169,6 +178,16 @@ def infer_latent_shape(vae, image_size, device):
 def append_jsonl(path, payload):
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+class ConditionalResize:
+    def __init__(self, image_size):
+        self.image_size = image_size
+
+    def __call__(self, image):
+        if image.size != (self.image_size, self.image_size):
+            return transforms.Resize((self.image_size, self.image_size))(image)
+        return image
     
     
 def main():
@@ -202,7 +221,7 @@ def main():
     # TODO: use transform to normalize your images to [-1, 1]
     # TODO: you can also use horizontal flip
     transform = transforms.Compose([
-        transforms.Resize((args.image_size, args.image_size)),
+        ConditionalResize(args.image_size),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize([0.5] * 3, [0.5] * 3),
@@ -223,15 +242,19 @@ def main():
     # TODO: shuffle
     shuffle = False if sampler else True
     # TODO dataloader
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-    )
+    dataloader_kwargs = {
+        "dataset": train_dataset,
+        "batch_size": args.batch_size,
+        "shuffle": shuffle,
+        "sampler": sampler,
+        "num_workers": args.num_workers,
+        "pin_memory": device.type == "cuda",
+        "drop_last": False,
+    }
+    if args.num_workers > 0:
+        dataloader_kwargs["persistent_workers"] = args.persistent_workers
+        dataloader_kwargs["prefetch_factor"] = args.prefetch_factor
+    train_loader = torch.utils.data.DataLoader(**dataloader_kwargs)
     
     # calculate total batch_size
     total_batch_size = args.batch_size * args.world_size 
@@ -296,6 +319,23 @@ def main():
     diffusion_scheduler = diffusion_scheduler.to(device)
     if class_embedder:
         class_embedder = class_embedder.to(device)
+
+    ema_unet = None
+    ema_class_embedder = None
+    if args.use_ema:
+        ema_unet = EMAModel(
+            unet,
+            decay=args.ema_decay,
+            update_after_step=args.ema_update_after_step,
+            update_every=args.ema_update_every,
+        ).to(device)
+        if class_embedder is not None:
+            ema_class_embedder = EMAModel(
+                class_embedder,
+                decay=args.ema_decay,
+                update_after_step=args.ema_update_after_step,
+                update_every=args.ema_update_every,
+            ).to(device)
     
     # TODO: setup optimizer
     trainable_params = list(unet.parameters())
@@ -357,11 +397,13 @@ def main():
     
     # TODO: setup evaluation pipeline
     # NOTE: this pipeline is not differentiable and only for evaluatin
+    eval_unet = ema_unet.ema_model if ema_unet is not None else unet_wo_ddp
+    eval_class_embedder = ema_class_embedder.ema_model if ema_class_embedder is not None else class_embedder_wo_ddp
     pipeline = DDPMPipeline(
-        unet_wo_ddp,
+        eval_unet,
         eval_scheduler,
         vae=vae_wo_ddp,
-        class_embedder=class_embedder_wo_ddp,
+        class_embedder=eval_class_embedder,
         vae_scale_factor=args.vae_scale_factor,
     )
     
@@ -378,11 +420,18 @@ def main():
         metrics_path = None
     
     # start tracker
+    wandb_logger = None
     if is_primary(args):
-        wandb_logger = wandb.init(
-            project='ddpm', 
-            name=args.run_name, 
-            config=vars(args))
+        wandb_init_kwargs = {
+            "project": os.environ.get("WANDB_PROJECT", "ddpm"),
+            "name": args.run_name,
+            "config": vars(args),
+            "dir": os.environ.get("WANDB_DIR", output_dir),
+        }
+        wandb_entity = os.environ.get("WANDB_ENTITY")
+        if wandb_entity:
+            wandb_init_kwargs["entity"] = wandb_entity
+        wandb_logger = wandb.init(**wandb_init_kwargs)
     
     # Start training    
     if is_primary(args):
@@ -507,6 +556,10 @@ def main():
             
             progress_bar.update(1)
             completed_steps += 1
+            if ema_unet is not None:
+                ema_unet.update(unet_wo_ddp, completed_steps)
+            if ema_class_embedder is not None and class_embedder_wo_ddp is not None:
+                ema_class_embedder.update(class_embedder_wo_ddp, completed_steps)
             
             # logger
             if step % args.log_every == 0 and is_primary(args):
@@ -529,6 +582,7 @@ def main():
                     "timestep_min": int(timesteps.min().detach().cpu()),
                     "timestep_max": int(timesteps.max().detach().cpu()),
                     "seconds_per_step": float(seconds_per_step),
+                    "ema_decay": float(ema_unet._current_decay()) if ema_unet is not None else None,
                 }
                 logger.info(
                     f"Epoch {epoch+1}/{args.num_epochs}, Step {step}/{num_update_steps_per_epoch}, "
@@ -544,6 +598,7 @@ def main():
                     "train/batch_std": metrics["batch_std"],
                     "train/timestep_mean": metrics["timestep_mean"],
                     "train/seconds_per_step": metrics["seconds_per_step"],
+                    **({"train/ema_decay": metrics["ema_decay"]} if metrics["ema_decay"] is not None else {}),
                     "global_step": metrics["global_step"],
                     "epoch": metrics["epoch"],
                 }, step=completed_steps)
@@ -595,12 +650,25 @@ def main():
             
         # save checkpoint
         if is_primary(args):
-            save_checkpoint(unet_wo_ddp, scheduler_wo_ddp, vae_wo_ddp, class_embedder_wo_ddp, optimizer, epoch, save_dir=save_dir)
+            save_checkpoint(
+                unet_wo_ddp,
+                scheduler_wo_ddp,
+                vae_wo_ddp,
+                class_embedder_wo_ddp,
+                optimizer,
+                epoch,
+                save_dir=save_dir,
+                ema_unet=ema_unet,
+                ema_class_embedder=ema_class_embedder,
+            )
 
         if stop_training:
             if is_primary(args):
                 logger.info(f"Reached max_train_steps={args.max_train_steps}. Stopping training early.")
             break
+
+    if is_primary(args) and wandb_logger is not None:
+        wandb_logger.finish()
 
 
 if __name__ == '__main__':

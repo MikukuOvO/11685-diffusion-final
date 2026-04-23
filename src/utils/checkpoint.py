@@ -1,13 +1,29 @@
 import torch
 import os
 
-def load_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=None, checkpoint_path='checkpoints/checkpoint.pth'):
+def _unwrap_state_dict(state_dict):
+    if isinstance(state_dict, dict) and "model" in state_dict:
+        return state_dict["model"]
+    return state_dict
+
+def load_checkpoint(
+    unet,
+    scheduler,
+    vae=None,
+    class_embedder=None,
+    optimizer=None,
+    checkpoint_path='checkpoints/checkpoint.pth',
+    use_ema=True,
+    ema_unet=None,
+    ema_class_embedder=None,
+):
     
     print("loading checkpoint")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     
     print("loading unet")
-    unet.load_state_dict(checkpoint['unet_state_dict'])
+    unet_key = 'ema_unet_state_dict' if use_ema and 'ema_unet_state_dict' in checkpoint else 'unet_state_dict'
+    unet.load_state_dict(_unwrap_state_dict(checkpoint[unet_key]))
     print("loading scheduler")
     scheduler_state_dict = {
         key: value
@@ -22,13 +38,32 @@ def load_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=No
     
     if class_embedder is not None and 'class_embedder_state_dict' in checkpoint:
         print("loading class_embedder")
-        class_embedder.load_state_dict(checkpoint['class_embedder_state_dict'])
+        class_key = 'ema_class_embedder_state_dict' if use_ema and 'ema_class_embedder_state_dict' in checkpoint else 'class_embedder_state_dict'
+        class_embedder.load_state_dict(_unwrap_state_dict(checkpoint[class_key]))
 
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         print("loading optimizer")
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-def save_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=None, epoch=None, save_dir='checkpoints'):
+    if ema_unet is not None and 'ema_unet_state_dict' in checkpoint:
+        print("loading ema_unet")
+        ema_unet.load_state_dict(checkpoint['ema_unet_state_dict'])
+
+    if ema_class_embedder is not None and 'ema_class_embedder_state_dict' in checkpoint:
+        print("loading ema_class_embedder")
+        ema_class_embedder.load_state_dict(checkpoint['ema_class_embedder_state_dict'])
+
+def save_checkpoint(
+    unet,
+    scheduler,
+    vae=None,
+    class_embedder=None,
+    optimizer=None,
+    epoch=None,
+    save_dir='checkpoints',
+    ema_unet=None,
+    ema_class_embedder=None,
+):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
@@ -45,6 +80,12 @@ def save_checkpoint(unet, scheduler, vae=None, class_embedder=None, optimizer=No
     
     if class_embedder is not None:
         checkpoint['class_embedder_state_dict'] = class_embedder.state_dict()
+
+    if ema_unet is not None:
+        checkpoint['ema_unet_state_dict'] = ema_unet.state_dict()
+
+    if ema_class_embedder is not None:
+        checkpoint['ema_class_embedder_state_dict'] = ema_class_embedder.state_dict()
     
     if optimizer is not None:
         checkpoint['optimizer_state_dict'] = optimizer.state_dict()
