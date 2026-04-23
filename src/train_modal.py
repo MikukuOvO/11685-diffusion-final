@@ -60,7 +60,7 @@ def _resolve_remote_path(base_dir: PurePosixPath, value: str) -> str:
     return str(base_dir / normalized)
 
 
-def _stream_subprocess(command: list[str], env: dict[str, str], cwd: str) -> None:
+def _stream_subprocess(command: list[str], env: dict[str, str], cwd: str, on_line=None) -> None:
     process = subprocess.Popen(
         command,
         cwd=cwd,
@@ -73,6 +73,8 @@ def _stream_subprocess(command: list[str], env: dict[str, str], cwd: str) -> Non
     assert process.stdout is not None
     for line in process.stdout:
         print(line, end="")
+        if on_line is not None:
+            on_line(line)
     return_code = process.wait()
     if return_code != 0:
         raise subprocess.CalledProcessError(return_code, command)
@@ -134,6 +136,7 @@ def train_remote(
     output_subdir: str = "train_runs",
     vae_ckpt_path: str = "",
     extra_args: str = "",
+    commit_every_steps: int = 100000,
     wandb_mode: str = "online",
     wandb_project: str = "ddpm",
     wandb_entity: str = "",
@@ -181,7 +184,28 @@ def train_remote(
     print(f"Training output dir: {output_dir}")
 
     _ensure_cuda_ready(env=env, cwd=str(REMOTE_SRC_DIR))
-    _stream_subprocess(command, env=env, cwd=str(REMOTE_SRC_DIR))
+    latest_global_step = 0
+    next_commit_step = commit_every_steps if commit_every_steps > 0 else None
+
+    def on_training_line(line: str) -> None:
+        nonlocal latest_global_step, next_commit_step
+        step_match = re.search(r"Global Step (\d+)", line)
+        if step_match:
+            latest_global_step = int(step_match.group(1))
+
+        if (
+            next_commit_step is not None
+            and latest_global_step >= next_commit_step
+            and "Checkpoint saved at" in line
+        ):
+            print(
+                f"Committing output volume after checkpoint near global step "
+                f"{latest_global_step} (threshold {next_commit_step})"
+            )
+            output_volume.commit()
+            next_commit_step += commit_every_steps
+
+    _stream_subprocess(command, env=env, cwd=str(REMOTE_SRC_DIR), on_line=on_training_line)
     output_volume.commit()
 
     return {
