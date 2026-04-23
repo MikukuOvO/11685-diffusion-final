@@ -1,10 +1,15 @@
-import torch
 import os
+import torch
+
 
 def _unwrap_state_dict(state_dict):
-    if isinstance(state_dict, dict) and "model" in state_dict:
-        return state_dict["model"]
+    if isinstance(state_dict, dict):
+        if "model" in state_dict:
+            return state_dict["model"]
+        if "shadow" in state_dict:
+            return state_dict["shadow"]
     return state_dict
+
 
 def load_checkpoint(
     unet,
@@ -21,9 +26,9 @@ def load_checkpoint(
     print("loading checkpoint")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     
-    print("loading unet")
     unet_key = 'ema_unet_state_dict' if use_ema and 'ema_unet_state_dict' in checkpoint else 'unet_state_dict'
-    unet.load_state_dict(_unwrap_state_dict(checkpoint[unet_key]))
+    print(f"loading unet ({unet_key})")
+    unet.load_state_dict(_unwrap_state_dict(checkpoint[unet_key]), strict=False)
     print("loading scheduler")
     scheduler_state_dict = {
         key: value
@@ -39,7 +44,7 @@ def load_checkpoint(
     if class_embedder is not None and 'class_embedder_state_dict' in checkpoint:
         print("loading class_embedder")
         class_key = 'ema_class_embedder_state_dict' if use_ema and 'ema_class_embedder_state_dict' in checkpoint else 'class_embedder_state_dict'
-        class_embedder.load_state_dict(_unwrap_state_dict(checkpoint[class_key]))
+        class_embedder.load_state_dict(_unwrap_state_dict(checkpoint[class_key]), strict=False)
 
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         print("loading optimizer")
@@ -52,7 +57,6 @@ def load_checkpoint(
     if ema_class_embedder is not None and 'ema_class_embedder_state_dict' in checkpoint:
         print("loading ema_class_embedder")
         ema_class_embedder.load_state_dict(checkpoint['ema_class_embedder_state_dict'])
-
 def save_checkpoint(
     unet,
     scheduler,
@@ -74,7 +78,6 @@ def save_checkpoint(
         'unet_state_dict': unet.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
     }
-    
     if vae is not None:
         checkpoint['vae_state_dict'] = vae.state_dict()
     

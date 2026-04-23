@@ -1,0 +1,45 @@
+run_name: ddpm_v2_ema_cosine_a100_40gb
+seed: 42
+data_dir: ../imagenet100_128x128/train
+output_dir: ../output/train_runs
+image_size: 128
+batch_size: 16
+num_workers: 8
+num_classes: 100
+num_epochs: 20
+max_train_steps: 120000
+learning_rate: 0.0002
+lr_scheduler: cosine
+lr_warmup_steps: 2000
+min_lr: 0.00002
+weight_decay: 0.0001
+grad_clip: 1.0
+log_every: 100
+mixed_precision: none
+use_ema: true
+ema_decay: 0.9999
+ema_start_step: 1000
+ema_update_every: 1
+
+num_train_timesteps: 1000
+num_inference_steps: 50
+beta_start: 0.0001
+beta_end: 0.02
+beta_schedule: cosine
+variance_type: fixed_small
+prediction_type: epsilon
+clip_sample: true
+clip_sample_range: 1.0
+
+unet_in_size: 128
+unet_in_ch: 3
+unet_ch: 128
+unet_num_res_blocks: 2
+unet_ch_mult: [1, 2, 2, 4]
+unet_attn: [2, 3]
+unet_dropout: 0.0
+
+latent_ddpm: false
+use_cfg: false
+cfg_guidance_scale: 2.0
+use_ddim: true
