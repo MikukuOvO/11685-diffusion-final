@@ -8,7 +8,8 @@ The best pixel diffusion checkpoint observed so far is:
 
 | Model / Checkpoint | Sampler | Eval Images | Local FID |
 | --- | --- | ---: | ---: |
-| Pixel DDPM v2, EMA, epoch 14 | DDIM-50 | 1000 | **139.7261** |
+| Pixel DDPM v3, EMA, epoch 6 | DDIM-50 | 1000 | **134.9025** |
+| Pixel DDPM v2, EMA, epoch 14 | DDIM-50 | 1000 | 139.7261 |
 | Pixel DDPM, epoch 14 | DDIM-50 | 1000 | 145.1464 |
 | Pixel DDPM, epoch 1 | DDIM-50 | 1000 | 150.6496 |
 | Pixel DDPM, epoch 18 | DDIM-50 | 1000 | 153.0033 |
@@ -17,7 +18,7 @@ The best pixel diffusion checkpoint observed so far is:
 | Pixel DDPM, epoch 0 | DDIM-50 | 1000 | 213.5419 |
 | VAE direct generation, epoch 1 | VAE sampling | 1000 | 412.6947 |
 
-The current recommendation is to keep the original Pixel DDPM epoch 14 submission as the best confirmed Kaggle result. Pixel DDPM v2 EMA epoch 14 improved local validation FID, but its hidden-test Kaggle score was worse.
+The current recommendation is to treat Pixel DDPM v3 as the best local-validation model, but keep the original Pixel DDPM epoch 14 submission as the best confirmed Kaggle result until v3 has a full 5000-image submission. Pixel DDPM v2 EMA epoch 14 improved local validation FID, but its hidden-test Kaggle score was worse.
 
 Kaggle submission result:
 
@@ -254,15 +255,80 @@ Likely causes:
 - The current VAE reconstruction/sample quality is poor relative to pixel DDPM.
 - CFG introduces additional hyperparameters, especially `cond_drop_rate` and guidance scale, that need validation.
 
+### 6. Pixel DDPM v3 with Linear Beta, EMA, and Cosine LR
+
+Relevant config:
+
+- `src/configs/ddpm_v3_linear_ema_cosinelr_a100_40gb.yaml`
+
+Important settings:
+
+| Setting | Value |
+| --- | --- |
+| Max train steps | 50000 |
+| Learning rate schedule | warmup + cosine decay |
+| Minimum LR | 2e-5 |
+| EMA decay | 0.9995 |
+| Noise schedule | linear beta, 1000 train timesteps |
+| Sampler for quick eval | DDIM-50 |
+| W&B run | `fenglin02/ddpm/runs/5ou8091r` |
+
+Observed result:
+
+| Checkpoint / Setting | Eval Images | Local FID | Comment |
+| --- | ---: | ---: | --- |
+| v3 EMA epoch 6, DDIM-50 | 1000 | **134.9025** | Best quick local FID so far |
+
+Training outcome:
+
+- Training completed cleanly at `max_train_steps=50000`.
+- Final saved checkpoint: `checkpoint_epoch_6.pth`.
+- Final epoch-level loss average: `0.02052`.
+- Final local quick FID@1000: `134.9025`.
+
+Epoch-level loss curve:
+
+| Epoch record | Global Step | Loss Avg |
+| ---: | ---: | ---: |
+| 0 | 8125 | 0.237797 |
+| 1 | 16250 | 0.042213 |
+| 2 | 24375 | 0.021238 |
+| 3 | 32500 | 0.020462 |
+| 4 | 40625 | 0.020313 |
+| 5 | 48750 | 0.019712 |
+| 6 | 50000 | 0.020520 |
+
+Interpretation:
+
+- v3 gives the best local quick FID so far, improving over v2 by about `4.82` FID points and over v1 by about `10.24` FID points.
+- The absolute gain is useful but not large enough to declare a decisive modeling breakthrough.
+- Most of the denoising-loss improvement still happens very early: by epoch 2 / `24375` steps, the loss has already reached about `0.0212`.
+- From epoch 2 to the final checkpoint, the loss remains close to `0.020`, but the sampled images continue to show clearer object outlines and more coherent large-scale color regions.
+- This creates an important diagnostic: denoising MSE is not sensitive enough to capture the visual improvements that still happen after the loss plateaus.
+
+Shortcomings:
+
+- The model still produces many abstract or painterly samples rather than clearly recognizable ImageNet-100 objects.
+- The final FID improvement is incremental, not transformative.
+- We only have a 1000-image local FID for v3 so far. A full 5000-image FID/submission is still needed before treating it as the best competition checkpoint.
+- Local FID has already failed to fully predict Kaggle hidden-test ranking for v2, so v3 must be validated on the leaderboard before replacing the v1 submission.
+
+Likely causes:
+
+- EMA and cosine LR help stabilize and refine samples, but they do not solve the core difficulty of unconditional ImageNet-100 generation at 128x128.
+- The epsilon-MSE loss saturates quickly because the model becomes competent at the average denoising task, while semantic object quality and class-level structure remain much harder.
+- The visual improvements after the loss plateau likely come from better allocation of probability mass and cleaner sampling trajectories, not from a large reduction in average per-pixel denoising error.
+- The current model remains unconditional, so generated samples do not use class labels at sampling time even though the competition data has explicit class structure.
+
 ## Main Lessons for the Final Report
 
 ### Loss Plateau Does Not Mean Best Samples
 
-The pixel DDPM loss dropped quickly and then remained around `0.020-0.021` for much of training. This suggests the model reached a stable denoising-loss regime early. However, FID still varied across checkpoints, and the final checkpoint was not the best.
+The pixel DDPM loss dropped quickly and then remained around `0.020-0.021` for much of training. This suggests the model reached a stable denoising-loss regime early. However, FID still varied across checkpoints, and v3 shows that visual outlines can keep improving even after the scalar loss has mostly plateaued.
 
 Report framing:
 
-> The denoising MSE stabilized early, but FID was not monotonic across checkpoints. Therefore, checkpoint selection using a generated-image validation metric was necessary.
+> The denoising MSE stabilized early, but FID and visible sample quality continued to change. Therefore, checkpoint selection must use generated-image validation rather than training loss alone.
 
 ### Longer Training Was Not Automatically Better
 
@@ -272,19 +338,21 @@ Report framing:
 
 > Continuing training past the best checkpoint did not improve FID, suggesting either mild overtraining, checkpoint noise, or insufficient late-stage optimization control.
 
-### Root Cause Analysis from the Last Two Long Runs
+### Root Cause Analysis from the Recent Long Runs
 
-The last two full runs were:
+The recent long runs were:
 
 | Run | Steps | Main Changes | Final / Best Local FID | Kaggle Score |
 | --- | ---: | --- | ---: | ---: |
 | v1 pixel DDPM | 150000 | linear beta, constant LR, raw weights | best measured FID@1000 `145.1464` at epoch 14 | **-126.40334** |
 | v2 pixel DDPM EMA | 120000 | cosine beta, warmup+cosine LR, EMA sampling | FID@5000 `115.0269` at epoch 14 | -119.39619 |
+| v3 pixel DDPM EMA | 50000 | linear beta, warmup+cosine LR, EMA sampling | FID@1000 `134.9025` at epoch 6 | not submitted yet |
 
 Training-duration evidence:
 
 - v1 reached most of its denoising-loss improvement by epoch 1 / about `16250` steps. After that, epoch-level loss stayed around `0.0201-0.0207` through `150000` steps.
 - v2 similarly reached its main loss drop by epoch 1 / about `16250` steps. After that, epoch-level loss moved only gradually from about `0.0397` to `0.0362` by `120000` steps.
+- v3 reached `0.0212` loss by epoch 2 / `24375` steps. From there to `50000` steps, loss moved only slightly, ending at `0.0205`.
 - v1's final checkpoint was not best: epoch 18 FID@1000 was `153.0033`, worse than epoch 14's `145.1464`.
 - These curves argue against "not enough epochs" as the primary failure mode. More steps under the same objective and architecture are unlikely to produce a large quality jump without additional changes.
 
@@ -295,18 +363,20 @@ Training-methodology evidence:
 - The UNet architecture is moderate in capacity for ImageNet-100 128x128. The generated images show texture and color structure but remain blurry with artifacts, which points to a model/data/objective quality ceiling rather than a simple undertraining issue.
 - v2 improved local FID but hurt hidden Kaggle score. That suggests the local validation reference is noisy or distribution-shifted relative to hidden test, and it also means we should not tune solely to one local FID number.
 - v2 changed EMA, LR schedule, and beta schedule together. Because the ablation is not isolated, we cannot attribute the local improvement cleanly to one factor. The hidden-score regression makes the cosine beta change especially suspect.
+- v3 isolates the safer part of v2 by keeping v1's linear beta schedule and adding EMA plus cosine LR. This improved quick local FID to `134.9025`, but the gain is still moderate and does not remove the semantic weakness visible in samples.
+- The v3 sample grids indicate that outlines and coarse structure can improve while loss is flat. This means the loss curve alone underestimates late-stage perceptual changes, but it also means the loss curve cannot tell us when to stop.
 
 Most likely root cause:
 
-> The main issue is not insufficient training duration. The stronger explanation is a methodology and model-selection problem: the current unconditional epsilon-MSE pixel DDPM reaches a denoising-loss plateau early, and additional training mostly changes checkpoint/sample statistics rather than steadily improving distribution quality. Local FID is useful but imperfect, and the v2 run shows that optimizing local FID can fail to transfer to the hidden Kaggle reference.
+> The main issue is not simply insufficient training duration. The stronger explanation is a methodology and model-selection problem: the current unconditional epsilon-MSE pixel DDPM reaches a denoising-loss plateau early, while semantic sample quality continues to change in ways that loss does not capture. EMA and cosine LR improve local FID, but the improvement is incremental. To get a larger gain, the next run should improve validation-driven model selection, sampling, and class-conditional generation rather than only extending training.
 
 Recommended next experiment if more GPU time is available:
 
-- Keep the v1 linear beta schedule as the safer baseline.
-- Add EMA and cosine LR as isolated changes, but do not change the beta schedule at the same time.
-- Evaluate raw and EMA checkpoints separately every few epochs.
-- Run a sampler sweep on the best checkpoint: DDIM-50, DDIM-100, and possibly DDPM/high-step sampling.
-- If time allows, prioritize class-conditional/CFG pixel diffusion over longer unconditional training, because the competition data has class structure.
+- Keep the v3 recipe as the current pixel baseline: linear beta, EMA, and warmup+cosine LR.
+- First run a full 5000-image v3 evaluation and Kaggle submission to test whether the local FID improvement transfers.
+- Add automated FID checkpoint tracking so training does not rely on the final checkpoint or visual inspection.
+- Run a sampler sweep on the best v3 checkpoint: DDIM-50, DDIM-100, and possibly DDPM/high-step sampling.
+- For the next modeling change, prioritize class-conditional or CFG pixel diffusion over longer unconditional training, because the competition data has class structure and the current unconditional model struggles with recognizable object semantics.
 
 ### Pixel DDPM Is Currently the Safer Submission Path
 
@@ -318,55 +388,76 @@ Report framing:
 
 ## Concrete Improvement Points
 
-### 1. Add EMA Weights
+### 1. Validate v3 with Full 5000-Image FID and Kaggle Submission
 
-Expected benefit:
+Recommended action:
 
-- More stable sampling checkpoints.
-- Potentially lower FID.
-- Less sensitivity to a single checkpoint's raw weights.
-
-Why it addresses the observed issue:
-
-- Current checkpoint FID fluctuates even when training loss is stable. EMA often smooths those fluctuations.
-
-### 2. Use a Learning Rate Schedule
-
-Recommended options:
-
-- Warmup + cosine decay.
-- Step decay after the early sharp loss drop.
-- Short low-LR fine-tune from the best checkpoint.
+- Generate 5000 images from `checkpoint_epoch_6.pth` using EMA + DDIM-50.
+- Compute full local FID against `val_stats.npz`.
+- Submit the 5000-image CSV to Kaggle/Cargo if formatting is valid.
 
 Why it addresses the observed issue:
 
-- The constant `2e-4` learning rate may be too aggressive after the model enters the plateau. A decayed learning rate may help refine samples instead of oscillating around similar loss values.
+- v3 improved quick FID@1000 to `134.9025`, but v2 already showed that local validation improvement may not transfer to the hidden leaderboard.
+- A full submission is the only way to decide whether v3 should replace the current v1 Kaggle-validated result.
 
-### 3. Automate FID Checkpoint Tracking
+### 2. Automate FID Checkpoint Tracking
 
 Recommended protocol:
 
-- Every few epochs, generate 1000 validation images with DDIM-50.
-- Record local FID in a table and W&B.
-- Keep the best-FID checkpoint separately from the latest checkpoint.
+- Every epoch or every fixed step interval, generate 1000 validation images with DDIM-50.
+- Compute local FID and log it to W&B.
+- Save a copy or symlink for the best-FID checkpoint.
+- Keep both raw and EMA metrics so we can see whether EMA consistently helps.
 
 Why it addresses the observed issue:
 
-- The final checkpoint was not the best. Automatic FID tracking would make model selection more reliable.
+- Loss reaches a plateau early, but visible sample quality and FID continue to change.
+- The final checkpoint is not guaranteed to be best, and visual inspection alone is too subjective.
 
-### 4. Sweep Final Sampling Settings
+### 3. Sweep Final Sampling Settings
 
-Recommended sweep on the best checkpoint:
+Recommended sweep on the best v3 checkpoint:
 
 - DDIM-50.
 - DDIM-100.
-- Full DDPM or a higher-step DDPM/DDIM variant if time permits.
+- DDIM-200 if time permits.
+- Full DDPM or higher-step stochastic sampling if generation time is acceptable.
 
 Why it addresses the observed issue:
 
-- DDIM-50 is efficient and comparable, but the final Kaggle submission may benefit from more sampling steps.
+- The current FID is measured only with DDIM-50.
+- If outlines are improving while loss is flat, sampling trajectory quality may be a meaningful bottleneck.
+- A better sampler may improve final images without another long training run.
 
-### 5. Improve the VAE Before Relying on Latent Diffusion
+### 4. Add Class-Conditional Pixel Diffusion or Pixel CFG
+
+Recommended direction:
+
+- Extend the pixel DDPM path to use class labels during training and sampling.
+- Start with explicit class conditioning before relying on latent CFG.
+- Sweep guidance scale if classifier-free guidance is used.
+
+Why it addresses the observed issue:
+
+- The generated images now have outlines, but object identity remains weak.
+- The dataset and competition are class-structured, while the current pixel model is effectively unconditional.
+- Conditioning should directly target the semantic weakness that EMA/LR scheduling did not solve.
+
+### 5. Consider a Plateau-Aware Fine-Tune Instead of Longer Training
+
+Recommended options:
+
+- Resume from the best v3 checkpoint with a very low LR.
+- Try a short fine-tune with a lower `min_lr`, such as `5e-6` or `1e-5`.
+- Increase EMA decay slightly only after confirming sample diversity does not collapse.
+
+Why it addresses the observed issue:
+
+- The model has already reached the low-loss regime.
+- More training at the same settings is unlikely to produce a large jump, but a lower-LR refinement run may improve outlines and texture without destabilizing the learned denoiser.
+
+### 6. Improve the VAE Before Relying on Latent Diffusion
 
 Recommended improvements:
 
@@ -378,7 +469,7 @@ Why it addresses the observed issue:
 
 - The VAE direct FID is very poor. A weak decoder can limit latent diffusion output quality regardless of CFG.
 
-### 6. Sweep CFG Hyperparameters
+### 7. Sweep CFG Hyperparameters
 
 Recommended sweep:
 
@@ -391,4 +482,4 @@ Why it addresses the observed issue:
 
 ## Report-Ready Conclusion
 
-This trial produced a usable pixel DDPM baseline, but the training dynamics were not ideal. The denoising loss improved rapidly early in training and then remained nearly flat for most of the run. Local FID did not improve monotonically: the best measured checkpoint was epoch 14 with FID@1000 of `145.1464`, while the final epoch 18 checkpoint worsened to `153.0033`. This suggests that the current setup benefits from explicit checkpoint selection and that future runs should include EMA weights, a decaying learning rate schedule, more systematic FID tracking, and a final sampling-step sweep. The VAE and latent DDPM + CFG path should be treated as an implemented but not yet competitive extension until the VAE quality and CFG hyperparameters are improved.
+The experiments show that the model learns the denoising objective quickly, but training loss is not a sufficient proxy for sample quality. In v3, the loss reached about `0.021` by `24375` steps and then stayed close to `0.020`, yet generated samples continued to develop clearer outlines and the final quick local FID improved to `134.9025`. This indicates that EMA and cosine LR are useful, but the improvement is incremental rather than a full solution. The next revision should treat v3 as the current local-FID baseline, validate it with a full 5000-image submission, automate FID-based checkpoint selection, sweep sampling settings, and then prioritize class-conditioned pixel diffusion or pixel CFG to address the remaining semantic weakness in generated images.

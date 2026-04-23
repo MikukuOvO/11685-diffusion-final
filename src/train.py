@@ -122,19 +122,29 @@ def sample_grid(
     generator,
     device,
 ):
+    num_images = max(1, int(args.eval_num_images))
+    grid_cols = max(1, int(math.sqrt(num_images)))
+    while num_images % grid_cols != 0 and grid_cols > 1:
+        grid_cols -= 1
+    grid_rows = math.ceil(num_images / grid_cols)
+    classes = None
+    if args.use_cfg:
+        classes = [idx % args.num_classes for idx in range(num_images)]
+
     gen_images = pipeline(
-        batch_size=4,
+        batch_size=num_images,
         num_inference_steps=args.num_inference_steps,
-        classes=[0, 1, 2, 3] if args.use_cfg else None,
+        classes=classes,
         guidance_scale=args.cfg_guidance_scale if args.use_cfg else None,
         generator=generator,
         device=device,
     )
 
-    grid_image = Image.new('RGB', (4 * image_size, image_size))
+    grid_image = Image.new('RGB', (grid_cols * image_size, grid_rows * image_size))
     for i, image in enumerate(gen_images):
-        x = (i % 4) * image_size
-        grid_image.paste(image, (x, 0))
+        x = (i % grid_cols) * image_size
+        y = (i // grid_cols) * image_size
+        grid_image.paste(image, (x, y))
     return grid_image
 
 
@@ -169,6 +179,7 @@ def parse_args():
     parser.add_argument("--ema_decay", type=float, default=0.9999, help="EMA decay for UNet weights")
     parser.add_argument("--ema_start_step", type=int, default=0, help="first optimizer step to update EMA")
     parser.add_argument("--ema_update_every", type=int, default=1, help="EMA update interval in optimizer steps")
+    parser.add_argument("--eval_num_images", type=int, default=16, help="number of generated images in epoch preview grids")
     
     # ddpm
     parser.add_argument("--num_train_timesteps", type=int, default=1000, help="ddpm training timesteps")
