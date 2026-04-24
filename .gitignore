@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 src/pretrained/
 *.log
+.DS_Store

@@ -369,30 +369,23 @@ def main():
     
     # setup dataset
     logger.info("Creating dataset")
-    # TODO: use transform to normalize your images to [-1, 1]
-    # TODO: you can also use horizontal flip
     transform = transforms.Compose([
         transforms.Resize((args.image_size, args.image_size)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize([0.5] * 3, [0.5] * 3),
     ])
-    # TOOD: use image folder for your train dataset
     train_dataset = datasets.ImageFolder(args.data_dir, transform=transform)
     
-    # TODO: setup dataloader
     sampler = None 
     if args.distributed:
-        # TODO: distributed sampler
         sampler = torch.utils.data.distributed.DistributedSampler(
             train_dataset,
             num_replicas=args.world_size,
             rank=args.rank,
             shuffle=True,
         )
-    # TODO: shuffle
     shuffle = False if sampler else True
-    # TODO dataloader
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -437,7 +430,6 @@ def main():
     num_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
     logger.info(f"Number of parameters: {num_params / 10 ** 6:.2f}M")
     
-    # TODO: ddpm shceduler
     diffusion_scheduler = DDPMScheduler(
         num_train_timesteps=args.num_train_timesteps,
         num_inference_steps=args.num_inference_steps,
@@ -465,7 +457,6 @@ def main():
     if class_embedder:
         class_embedder = class_embedder.to(device)
     
-    # TODO: setup optimizer
     trainable_params = list(unet.parameters())
     if class_embedder is not None:
         trainable_params += list(class_embedder.parameters())
@@ -553,8 +544,7 @@ def main():
     else:
         eval_scheduler = diffusion_scheduler
     
-    # TODO: setup evaluation pipeline
-    # NOTE: this pipeline is not differentiable and only for evaluatin
+    # This pipeline is used only for epoch preview sampling.
     pipeline = DDPMPipeline(
         unet_wo_ddp,
         eval_scheduler,
@@ -614,19 +604,16 @@ def main():
         
         loss_m = AverageMeter()
         
-        # TODO: set unet and scheduelr to train
         unet.train()
         diffusion_scheduler.train()
         if class_embedder is not None:
             class_embedder.train()
         
         
-        # TODO: finish this
         for step, (images, labels) in enumerate(train_loader):
             
             batch_size = images.size(0)
             
-            # TODO: send to device
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             
@@ -641,22 +628,18 @@ def main():
             batch_mean = images.detach().mean()
             batch_std = images.detach().std()
             
-            # TODO: zero grad optimizer
             optimizer.zero_grad(set_to_none=True)
             
             
             # NOTE: this is for CFG
             if class_embedder is not None:
-                # TODO: use class embedder to get class embeddings
                 class_emb = class_embedder(labels)
             else:
                 # NOTE: if not cfg, set class_emb to None
                 class_emb = None
             
-            # TODO: sample noise 
             noise = torch.randn_like(images)
             
-            # TODO: sample timestep t
             timesteps = torch.randint(
                 0,
                 diffusion_scheduler.num_train_timesteps,
@@ -665,10 +648,8 @@ def main():
                 dtype=torch.long,
             )
             
-            # TODO: add noise to images using scheduler
             noisy_images = diffusion_scheduler.add_noise(images, noise, timesteps)
             
-            # TODO: model prediction
             model_pred = unet(noisy_images, timesteps, class_emb)
             
             if args.prediction_type == 'epsilon':
@@ -676,7 +657,6 @@ def main():
             else:
                 raise NotImplementedError(f"Prediction type {args.prediction_type} not implemented.")
             
-            # TODO: calculate loss
             loss = F.mse_loss(model_pred, target)
             if not torch.isfinite(loss):
                 raise ValueError(f"Encountered non-finite loss at epoch {epoch}, step {step}: {loss.item()}")
@@ -686,7 +666,6 @@ def main():
             
             # backward and step 
             loss.backward()
-            # TODO: grad clip
             if args.grad_clip:
                 grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
             else:
@@ -699,7 +678,6 @@ def main():
                     2,
                 )
             
-            # TODO: step your optimizer
             optimizer.step()
             if lr_scheduler is not None:
                 lr_scheduler.step()

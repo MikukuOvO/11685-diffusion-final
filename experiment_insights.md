@@ -1,8 +1,10 @@
 # Experiment Insights and Failure Analysis
 
+> Status: historical experiment log. The pixel-era recommendations in this file are superseded by the final latent DDPM + CFG results in `VIDEO_REPORT_README.md`. Keep this file as source material for earlier experiments and failure analysis, not as the current best-model summary.
+
 This note summarizes the main results produced by the current project code and records the likely causes of the observed shortcomings. It is intended as source material for the final experimental report.
 
-## Current Best Result
+## Historical Pixel-Era Best Result
 
 The best pixel diffusion checkpoint observed so far is:
 
@@ -238,14 +240,14 @@ Implemented features:
 - CFG sampling support during inference.
 - Checkpoint save/load support for class embedder and VAE-related components.
 
-Current status:
+Historical status at the time of this note:
 
-- The code path exists and tests pass, but a full latent DDPM + CFG long training run has not yet produced a competitive reported FID.
+- The code path existed and tests passed, but a full latent DDPM + CFG long training run had not yet produced a competitive reported FID at that point.
 - The VAE baseline FID is weak, so latent diffusion quality may be limited by the VAE checkpoint.
 
 Shortcomings:
 
-- Latent DDPM + CFG is not yet validated as a better final submission path.
+- Superseded: later Modal training validated latent DDPM + CFG as the stronger final path.
 - The current VAE is likely not strong enough to support high-quality latent generation.
 - CFG guidance scale has not been swept.
 
@@ -378,9 +380,9 @@ Recommended next experiment if more GPU time is available:
 - Run a sampler sweep on the best v3 checkpoint: DDIM-50, DDIM-100, and possibly DDPM/high-step sampling.
 - For the next modeling change, prioritize class-conditional or CFG pixel diffusion over longer unconditional training, because the competition data has class structure and the current unconditional model struggles with recognizable object semantics.
 
-### Pixel DDPM Is Currently the Safer Submission Path
+### Pixel DDPM Was the Safer Submission Path at This Stage
 
-The VAE direct-generation FID was `412.6947`, and latent DDPM + CFG has not yet been fully validated. Pixel DDPM epoch 14 is currently the strongest Kaggle-validated model.
+The VAE direct-generation FID was `412.6947`, and latent DDPM + CFG had not yet been fully validated at this stage. This conclusion is superseded by the later latent DDPM + CFG runs summarized in `VIDEO_REPORT_README.md`.
 
 Report framing:
 

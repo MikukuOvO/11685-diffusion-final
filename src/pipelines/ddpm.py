@@ -93,17 +93,13 @@ class DDPMPipeline:
             if guidance_scale not in (None, 1.0):
                 uncond_emb = self.class_embedder.unconditional_embedding(batch_size, device)
         
-        # TODO: starts with random noise
         image = randn_tensor(image_shape, generator=generator, device=device)
 
-        # TODO: set step values using set_timesteps of scheduler
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         
-        # TODO: inverse diffusion process with for loop
         for t in self.progress_bar(self.scheduler.timesteps):
             model_input = image
 
-            # TODO: 1. predict noise model_output
             if uncond_emb is not None:
                 noise_uncond = self.unet(model_input, t, c=uncond_emb)
                 noise_cond = self.unet(model_input, t, c=class_emb)
@@ -111,20 +107,14 @@ class DDPMPipeline:
             else:
                 model_output = self.unet(model_input, t, c=class_emb)
             
-            # TODO: 2. compute previous image: x_t -> x_t-1 using scheduler
             image = self.scheduler.step(model_output, int(t), image, generator=generator)
             
         
-        # NOTE: this is for latent DDPM
-        # TODO: use VQVAE to get final image
         if self.vae is not None:
-            # NOTE: remember to rescale your images
             image = image / self.vae_scale_factor
             image = self.vae.decode(image)
-            # TODO: clamp your images values
             image = image.clamp(-1.0, 1.0)
         
-        # TODO: return final image, re-scale to [0, 1]
         image = (image / 2 + 0.5).clamp(0.0, 1.0)
         
         # convert to PIL images

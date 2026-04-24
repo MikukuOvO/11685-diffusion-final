@@ -14,7 +14,7 @@ Current repo:
 
 ```bash
 /media/volume/mmci/bozhu/11685/Project
-branch: main
+branch: final-fenglin
 remote: git@github.com:MikukuOvO/11685-diffusion-final.git
 ```
 
@@ -166,7 +166,7 @@ The final report should cover both pixel-space and latent-space diffusion:
 
 1. **Pixel DDPM baseline**
    - Train U-Net directly on normalized 128x128 RGB images.
-   - This is the safest Kaggle backup because it does not depend on VAE quality.
+   - This remains the pixel-space baseline and a useful Kaggle backup because it does not depend on VAE quality.
 
 2. **DDIM sampling**
    - Use the same pixel DDPM checkpoint.
@@ -179,7 +179,8 @@ The final report should cover both pixel-space and latent-space diffusion:
 
 4. **Latent DDPM**
    - Freeze the VAE encoder/decoder.
-   - Encode images to latents, scale by `vae_scale_factor=0.1845`, and train diffusion in latent space.
+   - Encode images to latents, scale by the config's `vae_scale_factor`, and train diffusion in latent space.
+   - The final official-VAE configs use `vae_scale_factor=0.1912`; keep training and inference on the same value.
    - Decode generated latents back to image space during sampling.
 
 5. **Latent DDPM + CFG**
@@ -635,9 +636,8 @@ __pycache__/
 
 ## Known Caveats
 
-- Current pixel DDPM is the safest route for a Kaggle backup.
-- Latent CFG code runs, but final quality depends heavily on VAE quality.
+- Pixel DDPM remains the clean baseline and Kaggle backup.
+- Latent DDPM + CFG is the current strongest path, with final quality still dependent on VAE decode quality.
 - Previous VAE local FID was poor (`fid_1000_vs_validation = 412.6947`), so do not assume latent results will beat pixel DDPM.
 - The current training loop does not compute FID automatically. Run FID separately after checkpoints are saved.
 - `num_epochs` can be larger than the actual run length because `max_train_steps` is the real stopping condition.
-

@@ -28,7 +28,7 @@ tar -xvf imagenet100_128x128.tar.gz
 
 This homework will start from implementing DDPM from scratch.
 
-We provide the basic code structure for you and you will be implementing the following modules (by filling all TODOs)):
+We provide the basic code structure for the project. The final implementation fills in the diffusion training, scheduler, latent, and CFG components in:
 
 ```
 1. pipelines/ddpm.py

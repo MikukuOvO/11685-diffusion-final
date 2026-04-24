@@ -89,6 +89,8 @@ We also saw the same DDIM-step trend earlier at epoch 140 with CFG 3.0:
 
 The main result is that latent DDPM + CFG is substantially stronger than the pixel DDPM baseline, and DDIM-250 gives a better quality-speed point than DDIM-50 for final submission. We used DDIM-50 for fast sweeps, then DDIM-250 for the selected checkpoint. DDIM-500 was tested in an earlier run, but it was slower and did not improve the hidden Kaggle score.
 
+The main advanced techniques used in the final path are EMA weights, warmup plus cosine learning-rate decay, mixed-precision training, validation-driven checkpoint selection, and CFG-scale/DDIM-step sweeps at inference time.
+
 We also observed that checkpoint selection matters. Training loss alone was not sufficient for model choice: FID continued changing after the loss had mostly plateaued. Continuing latent training from 150K to 190K steps improved both local FID and Kaggle score. We are also running a later continuation to test whether this trend keeps improving.
 
 ## 5. Limitations and Failure Cases
