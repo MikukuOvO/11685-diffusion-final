@@ -20,7 +20,7 @@ from torchvision.utils  import make_grid
 from models import UNet, VAE, ClassEmbedder
 from schedulers import DDPMScheduler, DDIMScheduler
 from pipelines import DDPMPipeline
-from utils import seed_everything, init_distributed_device, is_primary, AverageMeter, str2bool, save_checkpoint
+from utils import seed_everything, init_distributed_device, is_primary, AverageMeter, str2bool, save_checkpoint, load_checkpoint
 
 
 logger = get_logger(__name__)
@@ -61,6 +61,47 @@ def build_lr_scheduler(optimizer, args):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def sync_lr_scheduler_to_step(lr_scheduler, current_step):
+    if lr_scheduler is None or current_step <= 0:
+        return
+    if hasattr(lr_scheduler, "lr_lambdas") and hasattr(lr_scheduler, "base_lrs"):
+        last_lr = []
+        for param_group, lr_lambda, base_lr in zip(
+            lr_scheduler.optimizer.param_groups,
+            lr_scheduler.lr_lambdas,
+            lr_scheduler.base_lrs,
+        ):
+            lr = base_lr * lr_lambda(current_step)
+            param_group["lr"] = lr
+            last_lr.append(lr)
+        lr_scheduler.last_epoch = current_step
+        lr_scheduler._last_lr = last_lr
+        lr_scheduler._step_count = current_step + 1
+        return
+
+    lr_scheduler.last_epoch = current_step - 1
+    lr_scheduler.step()
+
+
+def resolve_output_paths(base_output_dir, run_name=None, exact_output_dir=False):
+    if exact_output_dir:
+        output_dir = base_output_dir
+        resolved_run_name = run_name
+        if resolved_run_name is None:
+            normalized = os.path.basename(os.path.normpath(base_output_dir))
+            resolved_run_name = normalized or "run"
+        return resolved_run_name, output_dir
+
+    os.makedirs(base_output_dir, exist_ok=True)
+    num_existing_runs = len(os.listdir(base_output_dir))
+    if run_name is None:
+        resolved_run_name = f'exp-{num_existing_runs}'
+    else:
+        resolved_run_name = f'exp-{num_existing_runs}-{run_name}'
+    output_dir = os.path.join(base_output_dir, resolved_run_name)
+    return resolved_run_name, output_dir
+
+
 class EMAModel:
     def __init__(self, model, decay=0.9999):
         self.decay = decay
@@ -86,7 +127,15 @@ class EMAModel:
 
     def load_state_dict(self, state_dict):
         self.decay = state_dict["decay"]
-        self.shadow = state_dict["shadow"]
+        loaded_shadow = state_dict["shadow"]
+        shadow = {}
+        for name, shadow_param in loaded_shadow.items():
+            target = self.shadow.get(name)
+            if target is not None:
+                shadow[name] = shadow_param.to(device=target.device, dtype=target.dtype)
+            else:
+                shadow[name] = shadow_param
+        self.shadow = shadow
 
 
 class use_ema_weights:
@@ -164,6 +213,7 @@ def parse_args():
     # training
     parser.add_argument("--run_name", type=str, default=None, help="run_name")
     parser.add_argument("--output_dir", type=str, default="experiments", help="output folder")
+    parser.add_argument("--exact_output_dir", type=str2bool, default=False, help="treat output_dir as the final run directory")
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--max_train_steps", type=int, default=None, help="optional override for total training steps")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate")
@@ -180,6 +230,9 @@ def parse_args():
     parser.add_argument("--ema_start_step", type=int, default=0, help="first optimizer step to update EMA")
     parser.add_argument("--ema_update_every", type=int, default=1, help="EMA update interval in optimizer steps")
     parser.add_argument("--eval_num_images", type=int, default=16, help="number of generated images in epoch preview grids")
+    parser.add_argument("--resume_ckpt", type=str, default=None, help="checkpoint path to resume training from")
+    parser.add_argument("--resume_epoch", type=int, default=None, help="epoch index to start from when resuming")
+    parser.add_argument("--resume_global_step", type=int, default=None, help="global optimizer step to resume from")
     
     # ddpm
     parser.add_argument("--num_train_timesteps", type=int, default=1000, help="ddpm training timesteps")
@@ -355,13 +408,11 @@ def main():
     args.total_batch_size = total_batch_size
     
     # setup experiment folder
-    os.makedirs(args.output_dir, exist_ok=True)
-    num_existing_runs = len(os.listdir(args.output_dir))
-    if args.run_name is None:
-        args.run_name = f'exp-{num_existing_runs}'
-    else:
-        args.run_name = f'exp-{num_existing_runs}-{args.run_name}'
-    output_dir = os.path.join(args.output_dir, args.run_name)
+    args.run_name, output_dir = resolve_output_paths(
+        args.output_dir,
+        run_name=args.run_name,
+        exact_output_dir=args.exact_output_dir,
+    )
     save_dir = os.path.join(output_dir, 'checkpoints')
     if is_primary(args):
         os.makedirs(output_dir, exist_ok=True)
@@ -436,6 +487,36 @@ def main():
     lr_scheduler = build_lr_scheduler(optimizer, args)
     ema_unet = EMAModel(unet, decay=args.ema_decay) if args.use_ema else None
     
+    start_epoch = 0
+    completed_steps = 0
+    if args.resume_ckpt is not None:
+        checkpoint = load_checkpoint(
+            unet,
+            diffusion_scheduler,
+            vae=vae,
+            class_embedder=class_embedder,
+            optimizer=optimizer,
+            checkpoint_path=args.resume_ckpt,
+            use_ema=False,
+            ema_unet=ema_unet,
+            load_ema_to_model=False,
+            return_checkpoint=True,
+        )
+        checkpoint_epoch = int(checkpoint.get("epoch", -1))
+        if args.resume_epoch is not None:
+            start_epoch = int(args.resume_epoch)
+        elif checkpoint_epoch >= 0:
+            start_epoch = checkpoint_epoch + 1
+
+        if args.resume_global_step is not None:
+            completed_steps = int(args.resume_global_step)
+        elif "global_step" in checkpoint:
+            completed_steps = int(checkpoint["global_step"])
+        elif checkpoint_epoch >= 0:
+            completed_steps = start_epoch * num_update_steps_per_epoch
+
+        sync_lr_scheduler_to_step(lr_scheduler, completed_steps)
+
     #  setup distributed training
     class_embedder_wo_ddp = class_embedder
     if args.distributed:
@@ -514,12 +595,13 @@ def main():
         logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not is_primary(args))
-    completed_steps = 0
+    if completed_steps > 0:
+        progress_bar.update(completed_steps)
     stop_training = False
     last_log_time = time.perf_counter()
 
     # training
-    for epoch in range(args.num_epochs):
+    for epoch in range(start_epoch, args.num_epochs):
         
         # set epoch for distributed sampler, this is for distribution training
         if hasattr(train_loader.sampler, 'set_epoch'):
@@ -743,6 +825,7 @@ def main():
                 class_embedder_wo_ddp,
                 optimizer,
                 epoch,
+                global_step=completed_steps,
                 save_dir=save_dir,
                 ema_unet=ema_unet,
             )

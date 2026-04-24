@@ -1,97 +1,109 @@
 # Video Report Script
 
-This README contains the final narration draft for the project video report. Replace the `[TODO]` placeholders before recording if those results are available.
+This file is the current 5-minute video-report plan for the ImageNet-100 diffusion project.
 
-## Suggested Timing
+## Timing
 
-| Section | Target Time |
-| --- | ---: |
-| Opening | 10 seconds |
-| Problem Description | 35-45 seconds |
-| Task | 30 seconds |
-| Approach / Methods | 1.5-2 minutes |
-| Results & Discussion | 1 minute |
-| Conclusions | 25-30 seconds |
+| Section | Time | Content |
+| --- | ---: | --- |
+| Title | 0:00-0:10 | Project title and team |
+| Problem and motivation | 0:10-0:40 | Why 128x128 ImageNet-100 generation is hard |
+| Task, data, baselines | 0:40-1:10 | Dataset, evaluation, pixel DDPM baseline |
+| Methodology | 1:10-2:40 | Pixel DDPM, DDIM, latent DDPM, CFG |
+| Results | 2:40-3:40 | FID/Kaggle table and sample grids |
+| Limitations | 3:40-4:05 | Failure cases and local-hidden gap |
+| Future work | 4:05-4:30 | Clean ablations and validation automation |
+| Conclusion | 4:30-4:50 | Main takeaways |
+| Bibliography | 4:50-4:55 | References on screen |
+
+## Core Story
+
+We first implemented a pixel-space DDPM baseline directly on 128x128 RGB images. Then we added DDIM sampling, a frozen official VAE, latent DDPM, class conditioning, classifier-free guidance, EMA, and cosine learning-rate scheduling. The strongest result so far comes from the latent DDPM + CFG path: epoch 280 with DDIM-250 and CFG 2.75 reached local FID 26.5575 and Kaggle score -25.83352. The pixel DDPM remains an important baseline, but its DDIM-50 full local FID is 92.3896, which shows that latent diffusion and CFG provide the main quality gain.
 
 ## 0. Opening
 
-Hi everyone. Our project is Latent Denoising Diffusion Probabilistic Models for ImageNet-100 generation. We study how to train diffusion models on 128 by 128 ImageNet-100 images, and how different sampling methods trade off generation quality and inference speed.
+Hi everyone. Our project is diffusion models for class-conditional image generation on ImageNet-100. We generate 128 by 128 images from 100 classes, evaluate with FID, and study the quality-speed trade-off between DDPM and DDIM sampling. We start from a pixel-space DDPM baseline and then extend the system with latent diffusion and classifier-free guidance.
 
-## 1. Problem Description
+## 1. Problem and Motivation
 
-Diffusion models are a powerful class of generative models. The basic idea is to gradually add noise to real images, then train a model to reverse this process and generate images from pure noise. Classic DDPMs can produce high-quality samples, but a major limitation is slow sampling, because the reverse denoising process often requires many steps.
+Image synthesis is a canonical generative-modeling task. The challenge in our setting is that ImageNet-100 has 100 semantic classes and high visual diversity, while 128 by 128 RGB images still have a large pixel space. A good model needs both fidelity, meaning realistic local details, and diversity, meaning coverage of many object categories and backgrounds.
 
-Prior work has addressed this in several ways. DDPM introduced the probabilistic denoising framework. DDIM showed that we can accelerate inference with fewer sampling steps without retraining the model. Latent diffusion reduces computation by running diffusion in a compressed VAE latent space. Classifier-free guidance, or CFG, uses conditional and unconditional predictions to improve class-conditional generation.
+Prior work motivates our design. DDPM introduced denoising diffusion as a strong but slow generative model. DDIM showed that the same trained checkpoint can be sampled with fewer reverse steps. Latent diffusion reduces computation by moving the diffusion process into a VAE latent space. Classifier-free guidance improves class-conditional generation by combining conditional and unconditional predictions.
 
-In this project, we ask three main questions. First, can we implement and train a usable diffusion model for ImageNet-100 from scratch? Second, can DDIM significantly reduce sampling time while preserving quality? Third, how do VAE and latent diffusion compare against pixel-space diffusion?
+Our goal is not only to reproduce a diffusion model, but also to understand which design choices matter under a fixed ImageNet-100 Kaggle evaluation.
 
-This task is challenging because ImageNet-100 contains 100 semantic classes and about 130,000 images. For unconditional generation, the model receives no explicit class label, so it must model many object categories and visual modes at once.
+## 2. Task, Data, and Baselines
 
-## 2. Task
+This is a re-implementation and application project. We implement the training and sampling pipeline, apply it to ImageNet-100 at 128 by 128 resolution, and evaluate generated-image quality with local FID and the Kaggle hidden test score.
 
-Our work is mainly a re-implementation and empirical evaluation project. Following the handout, we implemented a DDPM scheduler, a DDIM scheduler, a VAE baseline, latent DDPM, classifier-free guidance, and an evaluation pipeline for FID and Kaggle submission.
+The dataset contains roughly 130 thousand training images across 100 classes. We resize images to 128 by 128, apply random horizontal flip during training, convert images to tensors, and normalize pixel values to the range from -1 to 1.
 
-The dataset is ImageNet-100 at 128 by 128 resolution. We resize each image to 128 by 128, apply random horizontal flip, convert it to a tensor, and normalize pixel values from `[0, 1]` to `[-1, 1]`.
+The baseline is a pixel-space DDPM trained directly on RGB images. We also keep a VAE baseline for comparison, and build latent DDPM plus CFG as the stronger extension. For Kaggle, we generate 5000 images, 50 per class, extract Inception-v3 features, and submit the mean and covariance statistics.
 
-Our main model is an unconditional pixel-space DDPM. This means the diffusion model is trained directly in RGB image space, without using VAE latents and without using class labels. We also train and evaluate a VAE baseline, and we implement latent DDPM with CFG as the extension required by the handout.
+## 3. Methodology
 
-Visual cue: show several representative ImageNet-100 training images here.
+Our first path is pixel-space DDPM. During training, we sample a clean image x0, choose a random timestep t, add Gaussian noise to produce xt, and train a UNet to predict the added noise epsilon. The loss is mean squared error between predicted and true noise. The model operates directly on 3-channel 128 by 128 RGB tensors.
 
-## 3. Approach / Methods
+Our pixel run uses 1000 training timesteps, a linear beta schedule, AdamW, warmup plus cosine learning-rate decay, and EMA weights for evaluation. This gives a fair baseline for the original handout objective: train a usable pixel-space DDPM and test accelerated sampling with DDIM.
 
-Our implementation has three main paths.
+The second path is DDIM sampling. DDIM is not a new trained model. It reuses the same DDPM checkpoint and changes the reverse denoising trajectory. We use DDIM-50 as the fast evaluation sampler and DDIM-250 as the higher-quality submission sampler. In our experiments, DDIM-250 gave better local and Kaggle results than DDIM-50, while DDIM-500 was slower and did not improve the hidden score.
 
-The first and most important path is the unconditional pixel-space DDPM. During training, we start from a real image `x0`, randomly sample a timestep `t`, add Gaussian noise to obtain `xt`, and train a UNet to predict the added noise. The UNet input is the noisy image and the timestep, and the output is the predicted epsilon noise. The loss is mean squared error between predicted noise and true noise.
-
-Our current v0 pixel DDPM uses 1000 diffusion training timesteps with a linear beta schedule from `0.0001` to `0.02`. The UNet directly maps 3-channel 128 by 128 RGB tensors to predicted 3-channel noise tensors. It uses timestep embeddings, residual blocks, skip connections, and self-attention at lower spatial resolutions. The model has about 169.5 million parameters.
-
-For optimization, we use AdamW with an initial learning rate of `1e-4`, warmup, and cosine decay. We also maintain an exponential moving average, or EMA, of the UNet weights. During evaluation, we usually prefer EMA weights because they produce more stable samples.
-
-The second path is DDIM sampling. DDIM is not a separately trained model. Instead, it changes the reverse sampling process for the same DDPM checkpoint. We compare DDPM-200, DDIM-100, and DDIM-50, where the number indicates the number of reverse denoising steps. This directly evaluates the handout's requirement to study inference speedup and quality-speed trade-off.
-
-The third path is VAE, latent DDPM, and CFG. The VAE baseline learns an encoder-decoder representation for images. Latent DDPM uses the VAE encoder to map images into latent space, scales the latents by `0.1845`, trains diffusion in that latent space, and uses the VAE decoder to convert generated latents back into RGB images. The motivation is that latent space can be computationally cheaper than pixel space.
-
-CFG, or classifier-free guidance, supports class-conditional generation. During training, class conditions are randomly dropped so the same model learns both conditional and unconditional denoising. During sampling, we compute both predictions and combine them as:
+The third path is latent DDPM with classifier-free guidance. We use the official frozen VAE to encode images into 32 by 32 latents, train the diffusion model in latent space, and decode generated latents back to RGB. This reduces the spatial cost of diffusion substantially. For conditioning, we add a class embedder and use condition dropout during training. At sampling time, CFG combines unconditional and conditional noise predictions:
 
 ```text
 epsilon = epsilon_uncond + guidance_scale * (epsilon_cond - epsilon_uncond)
 ```
 
-For ImageNet-100, CFG can generate 50 images per class, giving the 5000 images required by Kaggle.
+We use DDIM-50 to sweep guidance scales cheaply, then run DDIM-250 with the best guidance value for full FID and Kaggle submission. For latent inference we set `clip_sample=false`; for pixel inference we keep `clip_sample=true`.
 
-For evaluation, we mainly use Frechet Inception Distance, or FID. Lower FID means the generated image feature distribution is closer to the real validation distribution. We also report seconds per image to measure sampling speed. Kaggle submission requires 5000 generated images and a CSV containing Inception feature statistics.
+## 4. Results and Discussion
 
-Visual cue: show a pipeline diagram with real image, forward noise, UNet denoising, reverse sampler, and generated image. Also show that DDPM and DDIM share the same checkpoint but use different samplers.
+The main quantitative results are:
 
-## 4. Results & Discussion
+| Model | Checkpoint | Sampler | CFG | Local FID@5000 | Kaggle |
+| --- | --- | --- | ---: | ---: | ---: |
+| Pixel DDPM | epoch 14 / 60K steps | DDIM-50 | none | 92.3896 | not submitted |
+| Latent DDPM + CFG | epoch 183 | DDIM-250 | 3.0 | 27.6855 | -26.86654 |
+| Latent DDPM + CFG | epoch 221 / 150K steps | DDIM-250 | 2.75 | 26.9785 | -26.41770 |
+| Latent DDPM + CFG | epoch 280 / 190K steps | DDIM-250 | 2.75 | 26.5575 | -25.83352 |
 
-Our experiments show that pixel-space DDPM is the most reliable generation path so far.
+The pixel DDPM baseline generates natural colors and some local textures, but many samples lack stable object structure. This matches its local FID of 92.3896. The latent model produces more recognizable objects and stronger class alignment, especially after CFG tuning and longer training.
 
-For speed, DDIM provides a clear improvement. In early experiments, DDPM-200 took about `1.2499` seconds per image, DDIM-100 took about `0.6153` seconds per image, and DDIM-50 took about `0.3076` seconds per image. This means DDIM-50 is roughly four times faster than DDPM-200.
+We also observed that checkpoint selection matters. Training loss alone was not sufficient for model choice: FID continued changing after the loss had mostly plateaued. Continuing latent training from 150K to 190K steps improved both local FID and Kaggle score. We are also running a later continuation to test whether this trend keeps improving.
 
-For quality, the VAE baseline was much weaker. Direct VAE sampling reached FID@1000 of `412.6947`, and the samples were blurry. Pixel DDPM performed substantially better. A previous pixel DDPM checkpoint at epoch 14 reached FID@1000 of `145.1464`, and its Kaggle submission was valid with score `-126.40334`.
+DDIM step count also matters. DDIM-50 is useful for quick CFG sweeps. DDIM-250 has been the best full-submission setting so far. DDIM-500 produced a slightly better local FID in one earlier run, but it was slower and did not improve the Kaggle hidden score.
 
-With EMA and learning-rate scheduling, local FID improved further. In the current v0 run, epoch 25 EMA with DDIM-50 reached local FID@1000 of `122.4505`.
+## 5. Limitations and Failure Cases
 
-[TODO: current v0 final checkpoint FID@1000.]
+The pixel-space DDPM is expensive because it denoises full 128 by 128 RGB images. Its samples often show texture-like patterns instead of clean semantic objects, especially because this baseline is not class-conditioned.
 
-[TODO: final selected best checkpoint, sampler, and FID@1000.]
+The latent model depends on the frozen VAE. The official VAE makes latent training feasible, but decoder bottlenecks can still introduce blur or local artifacts. Early latent checkpoints especially showed texture smoothing and repeated visual patterns.
 
-[TODO: final 5000-image local FID and Kaggle score.]
+Our local FID does not perfectly match the hidden Kaggle reference. The overall trend is useful, but it is not exact; for example, DDIM-500 did not transfer to a better hidden score even when local FID looked competitive.
 
-We also found that training loss is not enough for model selection. The denoising loss reaches a plateau relatively early, but FID and visual quality still vary across checkpoints. Therefore, we select checkpoints using generated-image validation rather than only using the final checkpoint.
+Finally, some improvements are bundled together, including EMA, cosine learning-rate decay, latent-space training, CFG, and sampler changes. This means the final model is strong, but the causal ablation is not fully isolated yet.
 
-For latent DDPM and CFG, the code path is implemented, including VAE encode/decode, latent scaling, class embedding, condition dropout, and CFG sampling. However, it has not become our strongest result so far. A likely reason is that the VAE baseline itself is weak, so latent representation and decoder quality can limit the final image quality.
+## 6. Future Work
 
-[TODO: latent DDPM FID@1000, if available.]
+First, we should run clean ablations: EMA on versus off, learning-rate schedule changes, DDIM step count, CFG scale, and `clip_sample` should be varied one at a time.
 
-[TODO: latent DDPM + CFG FID@1000, if available.]
+Second, we should automate checkpoint evaluation. A reliable pipeline should run DDIM-50 every fixed number of epochs, compute local FID, and only run DDIM-250 on promising checkpoints.
 
-Visually, pixel DDPM can generate natural textures and some local object structure, such as bird-like, animal-like, or natural-scene-like patterns. The main failure cases are blurry boundaries, unstable object identity, and samples that look more like abstract textures than clear objects. A likely cause is that our strongest pixel model is unconditional, so it must model all 100 classes without explicit semantic guidance.
+Third, we should train a class-conditioned pixel DDPM baseline. That would separate the benefit of class conditioning and CFG from the benefit of latent compression.
 
-## 5. Conclusions
+Fourth, we should improve validation reliability by evaluating multiple random seeds or using a local reference split closer to the Kaggle hidden distribution.
 
-In summary, we implemented DDPM, DDIM, VAE, latent DDPM, and CFG, and evaluated them on ImageNet-100 generation. Our main finding is that pixel-space DDPM is the most reliable path so far, DDIM significantly speeds up sampling, VAE direct sampling is a weak baseline, and EMA plus checkpoint selection are important for FID.
+## 7. Conclusion
 
-For final submission, we will use the best local-FID pixel DDPM EMA checkpoint with DDIM sampling to generate 5000 images for Kaggle. The next steps are to complete the DDPM-200, DDIM-100, and DDIM-50 comparison on the same checkpoint, and to further explore class-conditional pixel diffusion or CFG to improve semantic consistency.
+In this project, we built a complete DDPM system for ImageNet-100 generation, including pixel-space DDPM, DDIM sampling, VAE support, latent DDPM, CFG, EMA, Modal training, and Kaggle submission generation. The best current model is latent DDPM + CFG with DDIM-250 and CFG 2.75, reaching local FID 26.5575 and Kaggle -25.83352. The main takeaway is that latent diffusion, guidance-scale selection, sampler choice, and checkpoint selection are more important than simply training longer or relying only on denoising loss.
 
+## 8. Bibliography
+
+```text
+[1] J. Ho, A. Jain, and P. Abbeel, "Denoising Diffusion Probabilistic Models," NeurIPS, 2020.
+[2] J. Song, C. Meng, and S. Ermon, "Denoising Diffusion Implicit Models," ICLR, 2021.
+[3] R. Rombach et al., "High-Resolution Image Synthesis with Latent Diffusion Models," CVPR, 2022.
+[4] J. Ho and T. Salimans, "Classifier-Free Diffusion Guidance," NeurIPS Workshop, 2021.
+[5] M. Heusel et al., "GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium," NeurIPS, 2017.
+[6] J. Deng et al., "ImageNet: A Large-Scale Hierarchical Image Database," CVPR, 2009.
+```

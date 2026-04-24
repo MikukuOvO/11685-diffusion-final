@@ -9,12 +9,17 @@ def load_checkpoint(
     optimizer=None,
     checkpoint_path='checkpoints/checkpoint.pth',
     use_ema=False,
+    ema_unet=None,
+    load_ema_to_model=True,
+    return_checkpoint=False,
 ):
     
     print("loading checkpoint")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     
-    unet_key = 'ema_unet_state_dict' if use_ema and 'ema_unet_state_dict' in checkpoint else 'unet_state_dict'
+    unet_key = 'unet_state_dict'
+    if use_ema and load_ema_to_model and 'ema_unet_state_dict' in checkpoint:
+        unet_key = 'ema_unet_state_dict'
     print(f"loading unet ({unet_key})")
     unet_state_dict = checkpoint[unet_key]
     if unet_key == 'ema_unet_state_dict' and 'shadow' in unet_state_dict:
@@ -40,6 +45,13 @@ def load_checkpoint(
         print("loading optimizer")
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
+    if ema_unet is not None and 'ema_unet_state_dict' in checkpoint:
+        print("loading ema_unet")
+        ema_unet.load_state_dict(checkpoint['ema_unet_state_dict'])
+
+    if return_checkpoint:
+        return checkpoint
+
 def save_checkpoint(
     unet,
     scheduler,
@@ -47,6 +59,7 @@ def save_checkpoint(
     class_embedder=None,
     optimizer=None,
     epoch=None,
+    global_step=None,
     save_dir='checkpoints',
     ema_unet=None,
 ):
@@ -74,6 +87,8 @@ def save_checkpoint(
     
     if epoch is not None:
         checkpoint['epoch'] = epoch
+    if global_step is not None:
+        checkpoint['global_step'] = global_step
     
     # Save checkpoint
     torch.save(checkpoint, checkpoint_path)
