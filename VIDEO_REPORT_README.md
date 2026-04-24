@@ -38,7 +38,7 @@ This is a re-implementation and application project. We implement the training a
 
 The dataset contains roughly 130 thousand training images across 100 classes. We resize images to 128 by 128, apply random horizontal flip during training, convert images to tensors, and normalize pixel values to the range from -1 to 1.
 
-The baseline is a pixel-space DDPM trained directly on RGB images. We also keep a VAE baseline for comparison, and build latent DDPM plus CFG as the stronger extension. For Kaggle, we generate 5000 images, 50 per class, extract Inception-v3 features, and submit the mean and covariance statistics.
+The baseline is a pixel-space DDPM trained directly on RGB images. We also keep a VAE baseline for comparison, and build latent DDPM plus CFG as the stronger extension. For class-conditional Kaggle submissions, we generate 5000 images, 50 per class, extract Inception-v3 features, and submit the mean and covariance statistics.
 
 ## 3. Methodology
 
@@ -59,6 +59,8 @@ We use DDIM-50 to sweep guidance scales cheaply, then run DDIM-250 with the best
 ## 4. Results and Discussion
 
 The pixel DDPM baseline establishes the gap we need to close. With EMA and DDIM-50, the pixel model at epoch 14, or 60K steps, reached local FID@5000 of 92.3896. The samples have natural colors and local textures, but many images still look like texture collages rather than stable semantic objects.
+
+The direct VAE baseline was much weaker: direct VAE generation reached local FID@1000 of 412.6947. This is why we treat the VAE mainly as a frozen encoder-decoder for latent diffusion instead of using direct VAE samples as the final generation path.
 
 For the latent model, we selected the final setting in two stages. First, we fixed the checkpoint and used DDIM-50 to sweep CFG cheaply. On the epoch 221 checkpoint, CFG 2.75 was the best local setting, and CFG 3.0 was almost tied but slightly worse:
 
