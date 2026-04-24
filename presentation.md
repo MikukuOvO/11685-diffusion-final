@@ -17,6 +17,10 @@
   <img src="https://img.shields.io/badge/Modal-Training-7C3AED?style=flat-square" alt="Modal">
 </p>
 
+<p style="font-size: 1.05em; color: #374151; margin-top: 0.8em;">
+  <b>Yipeng Sun</b> · <b>Tianheng Lu</b> · <b>Fenglin Yu</b>
+</p>
+
 </div>
 
 ---
