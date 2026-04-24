@@ -516,7 +516,6 @@ Reference split closer to the hidden Kaggle distribution — more reliable local
 
 ## 📚 References
 
-<sub>
 
 1. J. Ho, A. Jain, P. Abbeel. **Denoising Diffusion Probabilistic Models.** *NeurIPS* 2020.
 2. J. Song, C. Meng, S. Ermon. **Denoising Diffusion Implicit Models.** *ICLR* 2021.
@@ -525,7 +524,6 @@ Reference split closer to the hidden Kaggle distribution — more reliable local
 5. M. Heusel et al. **GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium.** *NeurIPS* 2017.
 6. J. Deng et al. **ImageNet: A Large-Scale Hierarchical Image Database.** *CVPR* 2009.
 
-</sub>
 
 ---
 
