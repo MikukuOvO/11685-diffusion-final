@@ -10,7 +10,7 @@ This file is the current 5-minute video-report plan for the ImageNet-100 diffusi
 | Problem and motivation | 0:10-0:40 | Why 128x128 ImageNet-100 generation is hard |
 | Task, data, baselines | 0:40-1:10 | Dataset, evaluation, pixel DDPM baseline |
 | Methodology | 1:10-2:40 | Pixel DDPM, DDIM, latent DDPM, CFG |
-| Results | 2:40-3:40 | FID/Kaggle table and sample grids |
+| Results | 2:40-3:40 | FID/IS/Kaggle table and sample grids |
 | Limitations | 3:40-4:05 | Failure cases and local-hidden gap |
 | Future work | 4:05-4:30 | Clean ablations and validation automation |
 | Conclusion | 4:30-4:50 | Main takeaways |
@@ -18,11 +18,11 @@ This file is the current 5-minute video-report plan for the ImageNet-100 diffusi
 
 ## Core Story
 
-We first implemented a pixel-space DDPM baseline directly on 128x128 RGB images. Then we added DDIM sampling, a frozen official VAE, latent DDPM, class conditioning, classifier-free guidance, EMA, and cosine learning-rate scheduling. The strongest result so far comes from the latent DDPM + CFG path. The key result story is not only that later checkpoints improve, but that a fixed-checkpoint ablation shows how CFG scale and DDIM step count determine the final submission setting. The current best setting is epoch 280 with DDIM-250 and CFG 2.75, which reached local FID 26.5575 and Kaggle score -25.83352.
+We first implemented a pixel-space DDPM baseline directly on 128x128 RGB images. Then we added DDIM sampling, a frozen official VAE, latent DDPM, class conditioning, classifier-free guidance, EMA, and cosine learning-rate scheduling. The strongest result so far comes from the latent DDPM + CFG path. The key result story is not only that later checkpoints improve, but that a fixed-checkpoint ablation shows how CFG scale and DDIM step count determine the final submission setting. The current best setting is epoch 280 with DDIM-250 and CFG 2.75, which reached local FID 26.5575, IS 33.9124 +/- 1.5932, and Kaggle score -25.83352.
 
 ## 0. Opening
 
-Hi everyone. Our project is diffusion models for class-conditional image generation on ImageNet-100. We generate 128 by 128 images from 100 classes, evaluate with FID, and study the quality-speed trade-off between DDPM and DDIM sampling. We start from a pixel-space DDPM baseline and then extend the system with latent diffusion and classifier-free guidance.
+Hi everyone. Our project is diffusion models for class-conditional image generation on ImageNet-100. We generate 128 by 128 images from 100 classes, evaluate with FID and Inception Score, and study the quality-speed trade-off between DDPM and DDIM sampling. We start from a pixel-space DDPM baseline and then extend the system with latent diffusion and classifier-free guidance.
 
 ## 1. Problem and Motivation
 
@@ -34,11 +34,11 @@ Our goal is not only to reproduce a diffusion model, but also to understand whic
 
 ## 2. Task, Data, and Baselines
 
-This is a re-implementation and application project. We implement the training and sampling pipeline, apply it to ImageNet-100 at 128 by 128 resolution, and evaluate generated-image quality with local FID and the Kaggle hidden test score.
+This is a re-implementation and application project. We implement the training and sampling pipeline, apply it to ImageNet-100 at 128 by 128 resolution, and evaluate generated-image quality with local FID, Inception Score, and the Kaggle hidden test score.
 
 The dataset contains roughly 130 thousand training images across 100 classes. We resize images to 128 by 128, apply random horizontal flip during training, convert images to tensors, and normalize pixel values to the range from -1 to 1.
 
-The baseline is a pixel-space DDPM trained directly on RGB images. We also keep a VAE baseline for comparison, and build latent DDPM plus CFG as the stronger extension. For class-conditional Kaggle submissions, we generate 5000 images, 50 per class, extract Inception-v3 features, and submit the mean and covariance statistics.
+The baseline is a pixel-space DDPM trained directly on RGB images. We also keep a VAE baseline for comparison, and build latent DDPM plus CFG as the stronger extension. For class-conditional Kaggle submissions, we generate 5000 images, 50 per class, extract Inception-v3 features, and submit the mean and covariance statistics. FID is the primary selection metric because it compares generated statistics to a reference set; IS is a secondary metric for sample sharpness and classifiability.
 
 ## 3. Methodology
 
@@ -58,36 +58,36 @@ We use DDIM-50 to sweep guidance scales cheaply, then run DDIM-250 with the best
 
 ## 4. Results and Discussion
 
-The pixel DDPM baseline establishes the gap we need to close. With EMA and DDIM-50, the pixel model at epoch 14, or 60K steps, reached local FID@5000 of 92.3896. The samples have natural colors and local textures, but many images still look like texture collages rather than stable semantic objects.
+The pixel DDPM baseline establishes the gap we need to close. With EMA and DDIM-50, the pixel model at epoch 14, or 60K steps, reached local FID@5000 of 92.3896 and IS 7.6879 +/- 0.2316. The samples have natural colors and local textures, but many images still look like texture collages rather than stable semantic objects.
 
-The direct VAE baseline was much weaker: direct VAE generation reached local FID@1000 of 412.6947. This is why we treat the VAE mainly as a frozen encoder-decoder for latent diffusion instead of using direct VAE samples as the final generation path.
+The direct VAE baseline was much weaker: direct VAE generation reached local FID@1000 of 412.6947. The current repo keeps that historical FID result, but the direct VAE generated samples are not retained, so its IS cannot be recomputed from the saved artifacts. This is why we treat the VAE mainly as a frozen encoder-decoder for latent diffusion instead of using direct VAE samples as the final generation path.
 
 For the latent model, we selected the final setting in two stages. First, we fixed the checkpoint and used DDIM-50 to sweep CFG cheaply. On the epoch 221 checkpoint, CFG 2.75 was the best local setting, and CFG 3.0 was almost tied but slightly worse:
 
-| Checkpoint | Sampler | CFG | Local FID@5000 |
-| --- | --- | ---: | ---: |
-| Latent epoch 221 | DDIM-50 | 2.00 | 33.2586 |
-| Latent epoch 221 | DDIM-50 | 2.25 | 30.6560 |
-| Latent epoch 221 | DDIM-50 | 2.50 | 29.3073 |
-| Latent epoch 221 | DDIM-50 | 2.75 | **28.7364** |
-| Latent epoch 221 | DDIM-50 | 3.00 | 28.7687 |
+| Checkpoint | Sampler | CFG | Local FID@5000 | IS |
+| --- | --- | ---: | ---: | ---: |
+| Latent epoch 221 | DDIM-50 | 2.00 | 33.2586 | 25.0538 +/- 0.9212 |
+| Latent epoch 221 | DDIM-50 | 2.25 | 30.6560 | 28.1972 +/- 1.6492 |
+| Latent epoch 221 | DDIM-50 | 2.50 | 29.3073 | 30.6485 +/- 1.1874 |
+| Latent epoch 221 | DDIM-50 | 2.75 | **28.7364** | 33.0087 +/- 1.4404 |
+| Latent epoch 221 | DDIM-50 | 3.00 | 28.7687 | **34.6128 +/- 1.4460** |
 
 Second, after continuing to epoch 280, we kept CFG 2.75 and compared DDIM step counts. DDIM-250 was better than DDIM-50 on local FID and became the final Kaggle setting:
 
-| Checkpoint | Sampler | CFG | Local FID@5000 | Kaggle |
-| --- | --- | ---: | ---: | ---: |
-| Latent epoch 280 | DDIM-50 | 2.75 | 28.2489 | not submitted |
-| Latent epoch 280 | DDIM-250 | 2.75 | **26.5575** | **-25.83352** |
+| Checkpoint | Sampler | CFG | Local FID@5000 | IS | Kaggle |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Latent epoch 280 | DDIM-50 | 2.75 | 28.2489 | 33.9030 +/- 1.2516 | not submitted |
+| Latent epoch 280 | DDIM-250 | 2.75 | **26.5575** | **33.9124 +/- 1.5932** | **-25.83352** |
 
 We also saw the same DDIM-step trend earlier at epoch 140 with CFG 3.0:
 
-| Checkpoint | Sampler | CFG | Local FID@5000 | Kaggle |
-| --- | --- | ---: | ---: | ---: |
-| Latent epoch 140 | DDIM-50 | 3.0 | 31.3175 | -31.06839 |
-| Latent epoch 140 | DDIM-100 | 3.0 | 30.2484 | not submitted |
-| Latent epoch 140 | DDIM-250 | 3.0 | 29.6562 | -29.36503 |
+| Checkpoint | Sampler | CFG | Local FID@5000 | IS | Kaggle |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Latent epoch 140 | DDIM-50 | 3.0 | 31.3175 | 30.0683 +/- 0.9506 | -31.06839 |
+| Latent epoch 140 | DDIM-100 | 3.0 | 30.2484 | 29.8143 +/- 1.4076 | not submitted |
+| Latent epoch 140 | DDIM-250 | 3.0 | 29.6562 | 29.6847 +/- 1.2161 | -29.36503 |
 
-The main result is that latent DDPM + CFG is substantially stronger than the pixel DDPM baseline, and DDIM-250 gives a better quality-speed point than DDIM-50 for final submission. We used DDIM-50 for fast sweeps, then DDIM-250 for the selected checkpoint. DDIM-500 was tested in an earlier run, but it was slower and did not improve the hidden Kaggle score.
+The main result is that latent DDPM + CFG is substantially stronger than the pixel DDPM baseline, and DDIM-250 gives a better quality-speed point than DDIM-50 for final submission. We used DDIM-50 for fast sweeps, then DDIM-250 for the selected checkpoint. DDIM-500 was tested in an earlier run, but it was slower and did not improve the hidden Kaggle score. IS generally increases with stronger guidance, but FID is not minimized by the largest IS, so our final model selection uses FID and Kaggle first.
 
 The main advanced techniques used in the final path are EMA weights, warmup plus cosine learning-rate decay, mixed-precision training, validation-driven checkpoint selection, and CFG-scale/DDIM-step sweeps at inference time.
 
@@ -115,7 +115,7 @@ Fourth, we should improve validation reliability by evaluating multiple random s
 
 ## 7. Conclusion
 
-In this project, we built a complete DDPM system for ImageNet-100 generation, including pixel-space DDPM, DDIM sampling, VAE support, latent DDPM, CFG, EMA, Modal training, and Kaggle submission generation. The best current model is latent DDPM + CFG with DDIM-250 and CFG 2.75, reaching local FID 26.5575 and Kaggle -25.83352. The main takeaway is that latent diffusion, guidance-scale selection, sampler choice, and checkpoint selection are more important than simply training longer or relying only on denoising loss.
+In this project, we built a complete DDPM system for ImageNet-100 generation, including pixel-space DDPM, DDIM sampling, VAE support, latent DDPM, CFG, EMA, Modal training, and Kaggle submission generation. The best current model is latent DDPM + CFG with DDIM-250 and CFG 2.75, reaching local FID 26.5575, IS 33.9124 +/- 1.5932, and Kaggle -25.83352. The main takeaway is that latent diffusion, guidance-scale selection, sampler choice, and checkpoint selection are more important than simply training longer or relying only on denoising loss.
 
 ## 8. Bibliography
 

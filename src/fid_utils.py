@@ -11,6 +11,7 @@ Supports two input modes:
 Provides:
 - Inception-v3 feature extraction (2048-d pool3 features)
 - FID computation from statistics
+- Inception Score computation from generated images
 - CSV serialization for Kaggle submission
 - NPZ save/load for reference stats
 """
@@ -27,9 +28,26 @@ from scipy import linalg
 from tqdm import tqdm
 
 from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.inception import InceptionScore
 
 
 FEATURE_DIM = 2048
+
+
+def make_image_loader(image_dir, batch_size=64, num_workers=4):
+    """
+    Load images as uint8 tensors in [0, 255], matching torchmetrics' Inception
+    metrics. The resize keeps historical behavior from our FID pipeline.
+    """
+    dataset = FlatImageDataset(image_dir, transform=transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.PILToTensor(),
+    ]))
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True, drop_last=False,
+    )
+    return dataset, dataloader
 
 
 # ============================================================
@@ -57,7 +75,7 @@ class FlatImageDataset(Dataset):
     """
     Loads all images from a directory tree (any depth).
     Works with both ImageFolder structure and flat directories.
-    Returns float tensors in [0, 1] range (matching torchmetrics' expectation).
+    Returns whatever tensor format the provided transform produces.
     """
 
     EXTENSIONS = ('*.png', '*.jpg', '*.jpeg', '*.JPEG', '*.PNG', '*.JPG')
@@ -99,13 +117,8 @@ def extract_features_from_dir(image_dir, device='cuda', batch_size=64, num_worke
         np.ndarray of shape (N, 2048)
     """
     model = get_inception_model(device)
-    dataset = FlatImageDataset(image_dir, transform=transforms.Compose([
-        transforms.Resize((128, 128)),
-        transforms.PILToTensor(),  # uint8 [0, 255] as expected by torchmetrics Inception
-    ]))
-    dataloader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True, drop_last=False,
+    dataset, dataloader = make_image_loader(
+        image_dir, batch_size=batch_size, num_workers=num_workers,
     )
 
     print(f"Extracting features from {len(dataset)} images in {image_dir}")
@@ -162,6 +175,70 @@ def extract_features_from_tensors(images, device='cuda', batch_size=64):
 
 # Legacy alias for backward compatibility
 extract_features = extract_features_from_dir
+
+
+# ============================================================
+# Inception Score
+# ============================================================
+
+def compute_inception_score_from_probs(probs, splits=10, eps=1e-16):
+    """
+    Compute Inception Score from class probabilities.
+
+    This pure-numpy helper is mainly for tests and documentation. The normal
+    image-directory path below uses torchmetrics' Inception-v3 implementation.
+    """
+    probs = np.asarray(probs, dtype=np.float64)
+    if probs.ndim != 2:
+        raise ValueError(f"Expected 2D probabilities, got shape {probs.shape}")
+    if probs.shape[0] < splits:
+        raise ValueError(f"Need at least {splits} samples, got {probs.shape[0]}")
+
+    scores = []
+    for split_probs in np.array_split(probs, splits):
+        py = np.mean(split_probs, axis=0, keepdims=True)
+        kl = split_probs * (np.log(split_probs + eps) - np.log(py + eps))
+        scores.append(np.exp(np.mean(np.sum(kl, axis=1))))
+    return float(np.mean(scores)), float(np.std(scores))
+
+
+@torch.no_grad()
+def compute_inception_score_from_dir(
+    image_dir,
+    device='cuda',
+    batch_size=64,
+    num_workers=4,
+    splits=10,
+):
+    """
+    Compute Inception Score for all generated images in a directory.
+
+    Args:
+        image_dir: path to images (ImageFolder structure or flat)
+        device: torch device string
+        batch_size: inference batch size
+        num_workers: dataloader workers
+        splits: number of splits for reporting mean/std
+
+    Returns:
+        (mean, std) tuple. Higher mean usually indicates sharper and more
+        classifiable images, but IS does not compare against the target data
+        distribution and should be reported alongside FID.
+    """
+    metric = InceptionScore(splits=splits, normalize=False).to(device)
+    dataset, dataloader = make_image_loader(
+        image_dir, batch_size=batch_size, num_workers=num_workers,
+    )
+
+    print(f"Computing Inception Score from {len(dataset)} images in {image_dir}")
+    for batch in tqdm(dataloader, desc="Inception Score"):
+        metric.update(batch.to(device))
+
+    mean, std = metric.compute()
+    mean = float(mean.detach().cpu().item())
+    std = float(std.detach().cpu().item())
+    print(f"Inception Score: {mean:.4f} +/- {std:.4f}")
+    return mean, std
 
 
 # ============================================================

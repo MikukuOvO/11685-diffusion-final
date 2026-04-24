@@ -107,3 +107,15 @@ generate_submission_from_tensors(all_images, output_csv="submission.csv")
 ```
 
 This extracts Inception-v3 pool3 features, computes mean and covariance, and writes the CSV. Upload the CSV to the Kaggle InClass competition page.
+
+# 8. Inception Score
+
+To report IS for the same generated image folder:
+
+```
+python compute_is.py \
+    --image_dir /path/to/generated_images \
+    --output is.json
+```
+
+FID is the primary Kaggle metric because it compares generated statistics to a reference set. IS is reported as a secondary metric for sample sharpness/classifiability, so it should be interpreted alongside FID rather than as a replacement.

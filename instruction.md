@@ -433,7 +433,7 @@ For CFG, `inference.py` assigns classes in Kaggle order:
 class = image_index // 50
 ```
 
-## Local FID and Kaggle CSV
+## Local FID, IS and Kaggle CSV
 
 Reference validation stats are currently stored at:
 
@@ -454,6 +454,17 @@ python generate_submission.py \
   --save_npz ../output/report_eval/<run>_1000.npz \
   --batch_size 64
 ```
+
+Compute Inception Score from the same generated images:
+
+```bash
+python compute_is.py \
+  --image_dir ../output/train_runs/<run>/checkpoints/generated_images \
+  --output ../output/report_eval/<run>_is.json \
+  --batch_size 64
+```
+
+Use FID as the primary model-selection metric for Kaggle. Report IS as a secondary metric for image sharpness/classifiability.
 
 For Kaggle final submission, generate exactly 5000 images:
 
@@ -639,5 +650,5 @@ __pycache__/
 - Pixel DDPM remains the clean baseline and Kaggle backup.
 - Latent DDPM + CFG is the current strongest path, with final quality still dependent on VAE decode quality.
 - Previous VAE local FID was poor (`fid_1000_vs_validation = 412.6947`), so do not assume latent results will beat pixel DDPM.
-- The current training loop does not compute FID automatically. Run FID separately after checkpoints are saved.
+- The current training loop does not compute FID or IS automatically. Run evaluation separately after checkpoints are saved.
 - `num_epochs` can be larger than the actual run length because `max_train_steps` is the real stopping condition.
