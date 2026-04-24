@@ -18,7 +18,7 @@ This file is the current 5-minute video-report plan for the ImageNet-100 diffusi
 
 ## Core Story
 
-We first implemented a pixel-space DDPM baseline directly on 128x128 RGB images. Then we added DDIM sampling, a frozen official VAE, latent DDPM, class conditioning, classifier-free guidance, EMA, and cosine learning-rate scheduling. The strongest result so far comes from the latent DDPM + CFG path: epoch 280 with DDIM-250 and CFG 2.75 reached local FID 26.5575 and Kaggle score -25.83352. The pixel DDPM remains an important baseline, but its DDIM-50 full local FID is 92.3896, which shows that latent diffusion and CFG provide the main quality gain.
+We first implemented a pixel-space DDPM baseline directly on 128x128 RGB images. Then we added DDIM sampling, a frozen official VAE, latent DDPM, class conditioning, classifier-free guidance, EMA, and cosine learning-rate scheduling. The strongest result so far comes from the latent DDPM + CFG path. The key result story is not only that later checkpoints improve, but that a fixed-checkpoint ablation shows how CFG scale and DDIM step count determine the final submission setting. The current best setting is epoch 280 with DDIM-250 and CFG 2.75, which reached local FID 26.5575 and Kaggle score -25.83352.
 
 ## 0. Opening
 
@@ -58,20 +58,36 @@ We use DDIM-50 to sweep guidance scales cheaply, then run DDIM-250 with the best
 
 ## 4. Results and Discussion
 
-The main quantitative results are:
+The pixel DDPM baseline establishes the gap we need to close. With EMA and DDIM-50, the pixel model at epoch 14, or 60K steps, reached local FID@5000 of 92.3896. The samples have natural colors and local textures, but many images still look like texture collages rather than stable semantic objects.
 
-| Model | Checkpoint | Sampler | CFG | Local FID@5000 | Kaggle |
-| --- | --- | --- | ---: | ---: | ---: |
-| Pixel DDPM | epoch 14 / 60K steps | DDIM-50 | none | 92.3896 | not submitted |
-| Latent DDPM + CFG | epoch 183 | DDIM-250 | 3.0 | 27.6855 | -26.86654 |
-| Latent DDPM + CFG | epoch 221 / 150K steps | DDIM-250 | 2.75 | 26.9785 | -26.41770 |
-| Latent DDPM + CFG | epoch 280 / 190K steps | DDIM-250 | 2.75 | 26.5575 | -25.83352 |
+For the latent model, we selected the final setting in two stages. First, we fixed the checkpoint and used DDIM-50 to sweep CFG cheaply. On the epoch 221 checkpoint, CFG 2.75 was the best local setting, and CFG 3.0 was almost tied but slightly worse:
 
-The pixel DDPM baseline generates natural colors and some local textures, but many samples lack stable object structure. This matches its local FID of 92.3896. The latent model produces more recognizable objects and stronger class alignment, especially after CFG tuning and longer training.
+| Checkpoint | Sampler | CFG | Local FID@5000 |
+| --- | --- | ---: | ---: |
+| Latent epoch 221 | DDIM-50 | 2.00 | 33.2586 |
+| Latent epoch 221 | DDIM-50 | 2.25 | 30.6560 |
+| Latent epoch 221 | DDIM-50 | 2.50 | 29.3073 |
+| Latent epoch 221 | DDIM-50 | 2.75 | **28.7364** |
+| Latent epoch 221 | DDIM-50 | 3.00 | 28.7687 |
+
+Second, after continuing to epoch 280, we kept CFG 2.75 and compared DDIM step counts. DDIM-250 was better than DDIM-50 on local FID and became the final Kaggle setting:
+
+| Checkpoint | Sampler | CFG | Local FID@5000 | Kaggle |
+| --- | --- | ---: | ---: | ---: |
+| Latent epoch 280 | DDIM-50 | 2.75 | 28.2489 | not submitted |
+| Latent epoch 280 | DDIM-250 | 2.75 | **26.5575** | **-25.83352** |
+
+We also saw the same DDIM-step trend earlier at epoch 140 with CFG 3.0:
+
+| Checkpoint | Sampler | CFG | Local FID@5000 | Kaggle |
+| --- | --- | ---: | ---: | ---: |
+| Latent epoch 140 | DDIM-50 | 3.0 | 31.3175 | -31.06839 |
+| Latent epoch 140 | DDIM-100 | 3.0 | 30.2484 | not submitted |
+| Latent epoch 140 | DDIM-250 | 3.0 | 29.6562 | -29.36503 |
+
+The main result is that latent DDPM + CFG is substantially stronger than the pixel DDPM baseline, and DDIM-250 gives a better quality-speed point than DDIM-50 for final submission. We used DDIM-50 for fast sweeps, then DDIM-250 for the selected checkpoint. DDIM-500 was tested in an earlier run, but it was slower and did not improve the hidden Kaggle score.
 
 We also observed that checkpoint selection matters. Training loss alone was not sufficient for model choice: FID continued changing after the loss had mostly plateaued. Continuing latent training from 150K to 190K steps improved both local FID and Kaggle score. We are also running a later continuation to test whether this trend keeps improving.
-
-DDIM step count also matters. DDIM-50 is useful for quick CFG sweeps. DDIM-250 has been the best full-submission setting so far. DDIM-500 produced a slightly better local FID in one earlier run, but it was slower and did not improve the Kaggle hidden score.
 
 ## 5. Limitations and Failure Cases
 
